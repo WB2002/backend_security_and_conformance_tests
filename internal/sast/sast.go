@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -225,7 +226,7 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 
 	semgrepRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolSemgrep,
-		Args:             []string{"scan", "--config", "auto", "--json", "--quiet", scanPathFor(runner.ToolSemgrep)},
+		Args:             []string{"scan", "--config", "auto", "--json", "--quiet", "--exclude", "node_modules", "--exclude", "dist", "--exclude", "test/security/semgrep-fixtures", scanPathFor(runner.ToolSemgrep)},
 		TargetDir:        targetDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
@@ -241,9 +242,14 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 		all = append(all, f...)
 	}
 
+	gitleaksArgs := []string{"detect", "--source", scanPathFor(runner.ToolGitleaks), "--no-git", "--report-format", "json", "--report-path", "-"}
+	if _, statErr := os.Stat(filepath.Join(targetDir, ".gitleaks.toml")); statErr == nil {
+		gitleaksArgs = append(gitleaksArgs, "--config", filepath.ToSlash(filepath.Join(scanPathFor(runner.ToolGitleaks), ".gitleaks.toml")))
+	}
+
 	gitleaksRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolGitleaks,
-		Args:             []string{"detect", "--source", scanPathFor(runner.ToolGitleaks), "--no-git", "--report-format", "json", "--report-path", "-"},
+		Args:             gitleaksArgs,
 		TargetDir:        targetDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
@@ -261,7 +267,7 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 
 	trivyRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolTrivy,
-		Args:             []string{"fs", "--scanners", "vuln,misconfig,secret", "--format", "json", "--quiet", scanPathFor(runner.ToolTrivy)},
+		Args:             []string{"fs", "--scanners", "vuln,misconfig,secret", "--format", "json", "--quiet", "--skip-dirs", "node_modules,dist,.git,test,tests", scanPathFor(runner.ToolTrivy)},
 		TargetDir:        targetDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
