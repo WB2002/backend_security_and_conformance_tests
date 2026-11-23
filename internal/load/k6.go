@@ -123,6 +123,9 @@ func RunK6LoadTest(ctx context.Context, m types.BoilerplateManifest, baseURL str
 		return nil, err
 	}
 	defer os.RemoveAll(tmpDir)
+	if err := os.Chmod(tmpDir, 0o755); err != nil {
+		return nil, err
+	}
 
 	targetBase := baseURL
 	effectiveMode := runner.ResolveEffectiveMode(mode, runner.ToolK6)
@@ -133,7 +136,7 @@ func RunK6LoadTest(ctx context.Context, m types.BoilerplateManifest, baseURL str
 	scriptContent := GenerateK6Script(m, targetBase, profile)
 	scriptPath := filepath.Join(tmpDir, "load.js")
 	summaryPath := filepath.Join(tmpDir, "summary.json")
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0600); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o644); err != nil {
 		return nil, err
 	}
 

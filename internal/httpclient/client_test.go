@@ -1,9 +1,11 @@
 package httpclient_test
 
 import (
+	"bufio"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/config"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/httpclient"
@@ -57,4 +59,49 @@ func TestConfigAndHTTPClient(t *testing.T) {
 	if gotCSRF != "csrf-xyz" || gotCookie == "" {
 		t.Fatalf("expected csrf header and cookies, got csrf=%s cookie=%s", gotCSRF, gotCookie)
 	}
+}
+
+func TestClient_DoesNotHangOn101SwitchingProtocols(t *testing.T) {
+	hold := make(chan struct{})
+	defer close(hold)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("ResponseWriter does not implement http.Hijacker")
+		}
+		conn, bufrw, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack failed: %v", err)
+		}
+		defer conn.Close()
+		_, _ = bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = bufrw.Flush()
+		<-hold
+	}))
+	defer srv.Close()
+
+	client := httpclient.NewClient("ws-probe", srv.URL, 0)
+	client.HTTPClient.Timeout = 2 * time.Second
+
+	done := make(chan error, 1)
+	var resp *httpclient.Response
+	go func() {
+		var err error
+		resp, err = client.Request(http.MethodGet, "/socket.io/?EIO=4&transport=websocket", httpclient.RequestOptions{})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected 101 response without timeout/error, got %v", err)
+		}
+		if resp.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("expected 101, got %d", resp.StatusCode)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("client.Request hung reading 101 Switching Protocols body")
+	}
+	_ = bufio.NewReader
 }

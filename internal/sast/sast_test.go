@@ -2,6 +2,9 @@ package sast_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/runner"
@@ -95,6 +98,42 @@ func TestRunSASTSuiteAutoModeAndErrorPropagation(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected RunSASTSuite to return error when scanner fails with exit code 2")
+	}
+}
+
+func TestRunSASTSuite_IncludesExclusionsAndGitleaksConfig(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, ".gitleaks.toml"), []byte("title = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls []runner.ResolvedCommand
+	mockExec := func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+		calls = append(calls, cmd)
+		return runner.ToolExecutionResult{ExitCode: 0, Stdout: "", OK: true, Mode: cmd.Mode}, nil
+	}
+
+	_, err := sast.RunSASTSuite(context.Background(), tmp, runner.ModeLocal, mockExec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("expected 3 tool calls, got %d", len(calls))
+	}
+	if !slices.Contains(calls[0].Args, "test/security/semgrep-fixtures") {
+		t.Fatalf("expected semgrep args to exclude test/security/semgrep-fixtures, got %v", calls[0].Args)
+	}
+	if !slices.Contains(calls[0].Args, ".conformance-runner") {
+		t.Fatalf("expected semgrep args to exclude .conformance-runner, got %v", calls[0].Args)
+	}
+	if !slices.Contains(calls[1].Args, "--config") {
+		t.Fatalf("expected gitleaks args to include --config when .gitleaks.toml exists, got %v", calls[1].Args)
+	}
+	if !slices.Contains(calls[2].Args, "--skip-dirs") {
+		t.Fatalf("expected trivy args to include --skip-dirs, got %v", calls[2].Args)
+	}
+	if !slices.Contains(calls[2].Args, "node_modules,dist,.git,.conformance-runner,.worktrees,.tsd-emit,coverage,test,tests") {
+		t.Fatalf("expected trivy --skip-dirs to exclude .conformance-runner/.worktrees/.tsd-emit/coverage, got %v", calls[2].Args)
 	}
 }
 

@@ -1,6 +1,8 @@
 package graph_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/graph"
@@ -139,5 +141,53 @@ end
 			t.Fatalf("expected multi-alias edge to user.ex: %+v", exG.Edges)
 		}
 	})
+}
+
+func TestBuildSourceGraphFromDir_SkipsDotDirsTestsAndDeclarations(t *testing.T) {
+	tmp := t.TempDir()
+	mustWrite := func(rel, content string) {
+		full := filepath.Join(tmp, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mustWrite("tsconfig.json", `{"compilerOptions":{"paths":{"@/*":["./src/*"]}}}`)
+	mustWrite("src/app.module.ts", `import { AuthService } from '@/auth/auth.service'; export class AppModule {}`)
+	mustWrite("src/auth/auth.service.ts", `export class AuthService {}`)
+	mustWrite("src/auth/tests/auth.service.spec.ts", `import { AppModule } from '@/app.module'; import { AuthService } from '@/auth/auth.service';`)
+	mustWrite(".tsd-emit/app.module.d.ts", `import { AuthService } from './auth/auth.service';`)
+	mustWrite(".worktrees/old/src/cycle.ts", `import './cycle';`)
+	mustWrite("coverage/prettify.js", `function prettify() {}`)
+
+	g, err := graph.BuildSourceGraphFromDir(tmp, types.LangTypeScript)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(g.Nodes) != 2 {
+		t.Fatalf("expected 2 production nodes, got %d: %+v", len(g.Nodes), g.Nodes)
+	}
+}
+
+func TestBuildSourceGraphFromDir_DoesNotSkipDotRootDir(t *testing.T) {
+	dotRoot := filepath.Join(t.TempDir(), ".dot-target")
+	srcDir := filepath.Join(dotRoot, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "app.ts"), []byte("export const x = 1;"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := graph.BuildSourceGraphFromDir(dotRoot, types.LangTypeScript)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(g.Nodes) != 1 {
+		t.Fatalf("expected 1 node when targetDir basename starts with '.', got %d", len(g.Nodes))
+	}
 }
 

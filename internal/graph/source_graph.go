@@ -399,9 +399,19 @@ func parseTSConfigPaths(targetDir string) map[string][]string {
 }
 
 func shouldIncludeSourceFile(relPath string, lang types.BoilerplateLanguage) bool {
+	lower := strings.ToLower(relPath)
 	ext := strings.ToLower(filepath.Ext(relPath))
 	switch lang {
 	case types.LangTypeScript, types.LangJavaScript:
+		for _, suffix := range []string{
+			".d.ts", ".spec.ts", ".test.ts", ".test-d.ts",
+			".spec.tsx", ".test.tsx", ".spec.js", ".test.js",
+			".spec.mjs", ".test.mjs",
+		} {
+			if strings.HasSuffix(lower, suffix) {
+				return false
+			}
+		}
 		return ext == ".ts" || ext == ".tsx" || ext == ".js" || ext == ".mjs" || ext == ".cjs"
 	case types.LangGo:
 		return ext == ".go" && !strings.HasSuffix(relPath, "_test.go")
@@ -419,6 +429,8 @@ func BuildSourceGraphFromDir(targetDir string, lang types.BoilerplateLanguage) (
 	skipDirs := map[string]bool{
 		".git": true, "node_modules": true, "dist": true, "build": true,
 		"vendor": true, "_build": true, "deps": true, ".venv": true, "venv": true, "__pycache__": true,
+		"coverage": true, "reports": true, "test": true, "tests": true, "__tests__": true,
+		"evals": true, "jest": true, "scripts": true,
 	}
 
 	err := filepath.WalkDir(targetDir, func(p string, d fs.DirEntry, err error) error {
@@ -426,7 +438,7 @@ func BuildSourceGraphFromDir(targetDir string, lang types.BoilerplateLanguage) (
 			return err
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
+			if p != targetDir && ((d.Name() != "." && strings.HasPrefix(d.Name(), ".")) || skipDirs[d.Name()]) {
 				return filepath.SkipDir
 			}
 			return nil
