@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BoilerplateManifest",
+  "type": "object",
+  "required": ["name", "language", "capabilities"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "language": {
+      "type": "string",
+      "enum": ["typescript", "javascript", "go", "python", "elixir"]
+    },
+    "openapiUrl": { "type": "string" },
+    "capabilities": {
+      "type": "object",
+      "required": ["health"],
+      "properties": {
+        "health": {
+          "type": "object",
+          "required": ["path"],
+          "properties": {
+            "method": { "type": "string", "default": "GET" },
+            "path": { "type": "string", "minLength": 1 }
+          }
+        },
+        "auth": { "type": "object" },
+        "crud": { "type": "object" },
+        "rbac": { "type": "object" },
+        "ssrfTest": { "type": "object" },
+        "websockets": { "type": "object" }
+      }
+    }
+  }
+}
