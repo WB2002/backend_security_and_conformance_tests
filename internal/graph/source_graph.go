@@ -438,7 +438,7 @@ func BuildSourceGraphFromDir(targetDir string, lang types.BoilerplateLanguage) (
 			return err
 		}
 		if d.IsDir() {
-			if (d.Name() != "." && strings.HasPrefix(d.Name(), ".")) || skipDirs[d.Name()] {
+			if p != targetDir && ((d.Name() != "." && strings.HasPrefix(d.Name(), ".")) || skipDirs[d.Name()]) {
 				return filepath.SkipDir
 			}
 			return nil

@@ -226,7 +226,7 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 
 	semgrepRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolSemgrep,
-		Args:             []string{"scan", "--config", "auto", "--json", "--quiet", "--exclude", "node_modules", "--exclude", "dist", "--exclude", "test/security/semgrep-fixtures", scanPathFor(runner.ToolSemgrep)},
+		Args:             []string{"scan", "--config", "auto", "--json", "--quiet", "--exclude", "node_modules", "--exclude", "dist", "--exclude", "test/security/semgrep-fixtures", "--exclude", ".conformance-runner", "--exclude", ".worktrees", "--exclude", ".tsd-emit", "--exclude", "coverage", scanPathFor(runner.ToolSemgrep)},
 		TargetDir:        targetDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
@@ -267,7 +267,7 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 
 	trivyRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolTrivy,
-		Args:             []string{"fs", "--scanners", "vuln,misconfig,secret", "--format", "json", "--quiet", "--skip-dirs", "node_modules,dist,.git,test,tests", scanPathFor(runner.ToolTrivy)},
+		Args:             []string{"fs", "--scanners", "vuln,misconfig,secret", "--format", "json", "--quiet", "--skip-dirs", "node_modules,dist,.git,.conformance-runner,.worktrees,.tsd-emit,coverage,test,tests", scanPathFor(runner.ToolTrivy)},
 		TargetDir:        targetDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},

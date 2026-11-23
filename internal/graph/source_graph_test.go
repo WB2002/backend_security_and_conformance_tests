@@ -172,3 +172,22 @@ func TestBuildSourceGraphFromDir_SkipsDotDirsTestsAndDeclarations(t *testing.T) 
 	}
 }
 
+func TestBuildSourceGraphFromDir_DoesNotSkipDotRootDir(t *testing.T) {
+	dotRoot := filepath.Join(t.TempDir(), ".dot-target")
+	srcDir := filepath.Join(dotRoot, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "app.ts"), []byte("export const x = 1;"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := graph.BuildSourceGraphFromDir(dotRoot, types.LangTypeScript)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(g.Nodes) != 1 {
+		t.Fatalf("expected 1 node when targetDir basename starts with '.', got %d", len(g.Nodes))
+	}
+}
+

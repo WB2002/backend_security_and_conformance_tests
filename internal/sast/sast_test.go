@@ -123,11 +123,17 @@ func TestRunSASTSuite_IncludesExclusionsAndGitleaksConfig(t *testing.T) {
 	if !slices.Contains(calls[0].Args, "test/security/semgrep-fixtures") {
 		t.Fatalf("expected semgrep args to exclude test/security/semgrep-fixtures, got %v", calls[0].Args)
 	}
+	if !slices.Contains(calls[0].Args, ".conformance-runner") {
+		t.Fatalf("expected semgrep args to exclude .conformance-runner, got %v", calls[0].Args)
+	}
 	if !slices.Contains(calls[1].Args, "--config") {
 		t.Fatalf("expected gitleaks args to include --config when .gitleaks.toml exists, got %v", calls[1].Args)
 	}
 	if !slices.Contains(calls[2].Args, "--skip-dirs") {
 		t.Fatalf("expected trivy args to include --skip-dirs, got %v", calls[2].Args)
+	}
+	if !slices.Contains(calls[2].Args, "node_modules,dist,.git,.conformance-runner,.worktrees,.tsd-emit,coverage,test,tests") {
+		t.Fatalf("expected trivy --skip-dirs to exclude .conformance-runner/.worktrees/.tsd-emit/coverage, got %v", calls[2].Args)
 	}
 }
 

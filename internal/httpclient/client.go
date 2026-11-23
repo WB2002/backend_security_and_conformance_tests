@@ -241,6 +241,13 @@ func (c *ConformanceClient) Request(method, path string, opts RequestOptions) (*
 		c.Jar.StoreFrom(resp)
 	}
 
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return &Response{
+			StatusCode: resp.StatusCode,
+			Headers:    resp.Header.Clone(),
+		}, nil
+	}
+
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
