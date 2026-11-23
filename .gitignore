@@ -1,5 +1,9 @@
-node_modules/
-dist/
+bin/
+reports/
+.superpowers/
 .env
 *.log
+*.test
 .DS_Store
+node_modules/
+dist/
