@@ -1,8 +1,10 @@
 package sast_test
 
 import (
+	"context"
 	"testing"
 
+	"github.com/pc/backend-boilerplate-conformance-tests/internal/runner"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/sast"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
 )
@@ -78,3 +80,22 @@ func TestSASTParsers(t *testing.T) {
 		t.Fatalf("unexpected trivy findings: %+v", tFindings)
 	}
 }
+
+func TestRunSASTSuiteAutoModeAndErrorPropagation(t *testing.T) {
+	if got := sast.NormalizeRelativePath("/Users/pc/repo/internal/a.go", "../repo"); got == "/Users/pc/repo/internal/a.go" {
+		t.Fatalf("expected NormalizeRelativePath to handle relative targetDir")
+	}
+	_, err := sast.RunSASTSuite(context.Background(), "/tmp/repo", runner.ModeAuto, func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+		for _, a := range cmd.Args {
+			if a == "/tmp/repo" && cmd.Mode == runner.ModeDocker {
+				t.Fatalf("expected ModeAuto resolving to ModeDocker to pass /workspace, not host path %s", a)
+			}
+		}
+		return runner.ToolExecutionResult{ExitCode: 2, Stderr: "fatal scanner error"}, nil
+	})
+	if err == nil {
+		t.Fatalf("expected RunSASTSuite to return error when scanner fails with exit code 2")
+	}
+}
+
+

@@ -30,11 +30,12 @@ var (
 
 	tsFromImportRe    = regexp.MustCompile(`(?m)(?:import|export)\s+(?:type\s+)?(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]`)
 	tsRequireDynRe    = regexp.MustCompile(`(?:require|import)\s*\(\s*['"]([^'"]+)['"]\s*\)`)
-	pyFromImportRe    = regexp.MustCompile(`(?m)^\s*from\s+(\.+[A-Za-z0-9_.]*|[A-Za-z0-9_.]+)\s+import\s+([^\n#]+)`)
-	pyImportRe        = regexp.MustCompile(`(?m)^\s*import\s+([A-Za-z0-9_.,\s]+)`)
+	pyFromParenRe     = regexp.MustCompile(`(?ms)^\s*from\s+(\.+[A-Za-z0-9_.]*|[A-Za-z0-9_.]+)\s+import\s*\(([^)]+)\)`)
+	pyFromImportRe    = regexp.MustCompile(`(?m)^\s*from\s+(\.+[A-Za-z0-9_.]*|[A-Za-z0-9_.]+)\s+import\s+([^\n#(]+)`)
+	pyImportRe        = regexp.MustCompile(`(?m)^\s*import[ \t]+([A-Za-z0-9_., \t]+)`)
 	exDefmoduleRe     = regexp.MustCompile(`(?m)^\s*defmodule\s+([A-Z][A-Za-z0-9_.]*)\s+do\b`)
 	exMultiDirective  = regexp.MustCompile(`(?m)^\s*(?:alias|import|require|use)\s+([A-Z][A-Za-z0-9_.]*)\.\{([^}]+)\}`)
-	exSingleDirective = regexp.MustCompile(`(?m)^\s*(?:alias|import|require|use)\s+([A-Z][A-Za-z0-9_.]*)`)
+	exSingleDirective = regexp.MustCompile(`(?m)^\s*(?:alias|import|require|use)\s+([A-Z][A-Za-z0-9_.]*)(?:\s|$|,|#|:)`)
 	exRemoteCallRe    = regexp.MustCompile(`\b([A-Z][A-Za-z0-9_.]*)\.[a-z_][A-Za-z0-9_?!]*\s*\(`)
 )
 
@@ -271,7 +272,8 @@ func buildPythonGraph(files map[string]string, sortedPaths []string, addEdge fun
 		src := hashCommentRe.ReplaceAllString(files[filePath], "")
 		curDir := path.Dir(filePath)
 
-		for _, m := range pyFromImportRe.FindAllStringSubmatch(src, -1) {
+		fromMatches := append(pyFromParenRe.FindAllStringSubmatch(src, -1), pyFromImportRe.FindAllStringSubmatch(src, -1)...)
+		for _, m := range fromMatches {
 			modSpec := strings.TrimSpace(m[1])
 			namesPart := strings.TrimSpace(m[2])
 			var baseDir string

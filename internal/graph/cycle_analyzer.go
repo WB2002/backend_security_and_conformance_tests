@@ -144,6 +144,53 @@ func FindGraphCycles(g types.DependencyGraph, graphType string, findings []types
 
 			dfs(startNode)
 		}
+
+		// Fallback for SCCs whose shortest cycle is >= 12 nodes: find shortest cycle via BFS
+		foundInComp := false
+		for _, cyc := range rawCycles {
+			if len(cyc) > 0 && inComp[cyc[0]] {
+				foundInComp = true
+				break
+			}
+		}
+		if !foundInComp && len(comp) > 1 {
+			startNode := comp[0]
+			parent := make(map[string]string)
+			queue := []string{startNode}
+			parent[startNode] = startNode
+			var backNode string
+			for len(queue) > 0 && backNode == "" {
+				u := queue[0]
+				queue = queue[1:]
+				for _, v := range adj[u] {
+					if !inComp[v] {
+						continue
+					}
+					if v == startNode && u != startNode {
+						backNode = u
+						break
+					}
+					if _, seen := parent[v]; !seen {
+						parent[v] = u
+						queue = append(queue, v)
+					}
+				}
+			}
+			if backNode != "" {
+				var rev []string
+				for cur := backNode; cur != startNode; cur = parent[cur] {
+					rev = append(rev, cur)
+				}
+				rev = append(rev, startNode)
+				slices.Reverse(rev)
+				canon := canonicalizeCycle(rev)
+				sig := strings.Join(canon, "->")
+				if !seenSignatures[sig] {
+					seenSignatures[sig] = true
+					rawCycles = append(rawCycles, canon)
+				}
+			}
+		}
 	}
 
 	sort.Slice(rawCycles, func(i, j int) bool {

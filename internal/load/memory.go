@@ -1,10 +1,13 @@
 package load
 
 import (
+	"context"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
 )
@@ -75,3 +78,53 @@ func AnalyzeMemorySamples(samples []types.MemorySample, maxAllowedDriftPercent f
 		Samples:         samples,
 	}
 }
+
+func SampleDockerContainerMemory(ctx context.Context, interval time.Duration, maxDriftPercent float64) *types.MemoryLeakAnalysis {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil
+	}
+	var samples []types.MemorySample
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	collectOnce := func() {
+		out, err := exec.CommandContext(ctx, "docker", "stats", "--no-stream", "--format", "{{.MemUsage}}\t{{.CPUPerc}}").Output()
+		if err != nil {
+			return
+		}
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) == 0 || lines[0] == "" {
+			return
+		}
+		parts := strings.Split(lines[0], "\t")
+		rss, err := ParseDockerMemUsageBytes(parts[0])
+		if err != nil || rss <= 0 {
+			return
+		}
+		var cpu float64
+		if len(parts) > 1 {
+			cpu, _ = strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(parts[1]), "%"), 64)
+		}
+		samples = append(samples, types.MemorySample{
+			TimestampMs: time.Now().UnixMilli(),
+			RSSBytes:    rss,
+			CPUPercent:  cpu,
+		})
+	}
+
+	collectOnce()
+	for {
+		select {
+		case <-ctx.Done():
+			collectOnce()
+			if len(samples) == 0 {
+				return nil
+			}
+			res := AnalyzeMemorySamples(samples, maxDriftPercent)
+			return &res
+		case <-ticker.C:
+			collectOnce()
+		}
+	}
+}
+

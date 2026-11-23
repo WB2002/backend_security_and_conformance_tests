@@ -83,3 +83,4 @@ func TestStrictSecurityPolicyEvaluation(t *testing.T) {
 		t.Fatalf("expected cycle violation message, got %v", res.Violations)
 	}
 }
+

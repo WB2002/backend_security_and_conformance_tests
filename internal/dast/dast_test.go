@@ -1,9 +1,12 @@
 package dast_test
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/dast"
+	"github.com/pc/backend-boilerplate-conformance-tests/internal/runner"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
 )
 
@@ -45,4 +48,17 @@ _ POST /api/v1/projects _
 	if len(sFindings) != 1 || sFindings[0].Endpoint != "POST /api/v1/projects" {
 		t.Fatalf("schemathesis parse failed: %+v", sFindings)
 	}
+
+	// Verify RunDASTSuite propagates tool errors and rewrites URL in ModeAuto/ModeDocker
+	_, err = dast.RunDASTSuite(context.Background(), "http://127.0.0.1:3000", "/openapi.json", runner.ModeDocker, func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+		joined := strings.Join(cmd.Args, " ")
+		if strings.Contains(joined, "127.0.0.1") {
+			t.Fatalf("expected 127.0.0.1 rewritten to host.docker.internal in docker mode: %v", cmd.Args)
+		}
+		return runner.ToolExecutionResult{ExitCode: 3, Stderr: "scanner crashed"}, nil
+	})
+	if err == nil {
+		t.Fatalf("expected RunDASTSuite to propagate scanner execution error")
+	}
 }
+

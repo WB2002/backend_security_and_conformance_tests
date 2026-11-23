@@ -116,4 +116,28 @@ end
 			t.Fatalf("missing expected Elixir edges in %+v", g.Edges)
 		}
 	})
+
+	t.Run("Python consecutive imports and Elixir parent context non-false-edge", func(t *testing.T) {
+		pyG := graph.BuildSourceGraphFromFiles(map[string]string{
+			"app/a.py": "import os\nimport app.b\nfrom app.c import (\n    helper,\n)\n",
+			"app/b.py": "x = 1\n",
+			"app/c.py": "def helper(): pass\n",
+		}, graph.SourceGraphOptions{Language: types.LangPython})
+		if !hasEdge(pyG.Edges, "app/a.py", "app/b.py") || !hasEdge(pyG.Edges, "app/a.py", "app/c.py") {
+			t.Fatalf("expected consecutive/multiline python imports to resolve, got %+v", pyG.Edges)
+		}
+
+		exG := graph.BuildSourceGraphFromFiles(map[string]string{
+			"lib/my_app/accounts.ex":      "defmodule MyApp.Accounts do\nend\n",
+			"lib/my_app/accounts/user.ex": "defmodule MyApp.Accounts.User do\nend\n",
+			"lib/my_app/caller.ex":        "defmodule MyApp.Caller do\n  alias MyApp.Accounts.{User}\nend\n",
+		}, graph.SourceGraphOptions{Language: types.LangElixir})
+		if hasEdge(exG.Edges, "lib/my_app/caller.ex", "lib/my_app/accounts.ex") {
+			t.Fatalf("expected multi-alias not to create false edge to parent context MyApp.Accounts: %+v", exG.Edges)
+		}
+		if !hasEdge(exG.Edges, "lib/my_app/caller.ex", "lib/my_app/accounts/user.ex") {
+			t.Fatalf("expected multi-alias edge to user.ex: %+v", exG.Edges)
+		}
+	})
 }
+

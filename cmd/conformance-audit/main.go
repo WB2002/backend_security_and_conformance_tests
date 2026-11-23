@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -54,6 +55,20 @@ func main() {
 	modeFlag := flag.String("mode", string(runner.ModeAuto), "Tool execution mode (auto|docker|local)")
 	flag.Parse()
 
+	targetDir := strings.TrimSpace(*targetFlag)
+	if targetDir != "" {
+		absTarget, err := filepath.Abs(targetDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid --target path %q: %v\n", targetDir, err)
+			os.Exit(2)
+		}
+		if info, sErr := os.Stat(absTarget); sErr != nil || !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "Target directory %q does not exist or is not a directory\n", absTarget)
+			os.Exit(2)
+		}
+		targetDir = absTarget
+	}
+
 	stages := strings.Split(*stagesFlag, ",")
 	for i := range stages {
 		stages[i] = strings.TrimSpace(strings.ToLower(stages[i]))
@@ -70,18 +85,22 @@ func main() {
 			os.Exit(2)
 		}
 		m = loaded
-	} else if *targetFlag != "" {
-		candidate := filepath.Join(*targetFlag, "boilerplate.manifest.json")
-		if loaded, err := manifest.LoadManifest(candidate); err == nil {
+	} else if targetDir != "" {
+		candidate := filepath.Join(targetDir, "boilerplate.manifest.json")
+		loaded, err := manifest.LoadManifest(candidate)
+		if err == nil {
 			m = loaded
-		} else {
+		} else if errors.Is(err, os.ErrNotExist) {
 			m = types.BoilerplateManifest{
-				Name:     filepath.Base(*targetFlag),
-				Language: detectRepoLanguage(*targetFlag),
+				Name:     filepath.Base(targetDir),
+				Language: detectRepoLanguage(targetDir),
 				Capabilities: types.ManifestCapabilities{
 					Health: types.EndpointSpec{Method: "GET", Path: "/health"},
 				},
 			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Error loading manifest %s: %v\n", candidate, err)
+			os.Exit(2)
 		}
 	} else {
 		m = types.BoilerplateManifest{
@@ -95,6 +114,7 @@ func main() {
 
 	ctx := context.Background()
 	execMode := runner.ExecutionMode(*modeFlag)
+	pol := policy.StrictSecurityPolicy()
 
 	card := types.ConformanceScorecard{
 		TargetName: m.Name,
@@ -102,40 +122,76 @@ func main() {
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 	}
 
-	if *targetFlag != "" && hasStage("sast") {
-		if findings, err := sast.RunSASTSuite(ctx, *targetFlag, execMode, nil); err == nil {
-			card.Findings = append(card.Findings, findings...)
+	var stageErrors []string
+
+	if targetDir != "" && hasStage("sast") {
+		findings, err := sast.RunSASTSuite(ctx, targetDir, execMode, nil)
+		if err != nil {
+			stageErrors = append(stageErrors, fmt.Sprintf("SAST stage execution error: %v", err))
 		}
+		card.Findings = append(card.Findings, findings...)
 	}
 
-	if *targetFlag != "" && hasStage("graph") {
-		srcG, err := graph.BuildSourceGraphFromDir(*targetFlag, m.Language)
-		if err == nil {
-			analyzedSrc, analyzedPkg := graph.AnalyzeDependencyGraphs(srcG, card.PackageGraph, card.Findings)
-			card.SourceGraph = analyzedSrc
-			card.PackageGraph = analyzedPkg
+	if targetDir != "" && hasStage("graph") {
+		srcG, err := graph.BuildSourceGraphFromDir(targetDir, m.Language)
+		if err != nil {
+			stageErrors = append(stageErrors, fmt.Sprintf("Source graph build error: %v", err))
 		}
+		sbomG, scaFindings, sbomErr := graph.RunSBOMAndOSVScan(ctx, targetDir, execMode, nil)
+		if sbomErr != nil {
+			stageErrors = append(stageErrors, fmt.Sprintf("SBOM/OSV graph stage error: %v", sbomErr))
+		} else {
+			card.Findings = append(card.Findings, scaFindings...)
+		}
+		analyzedSrc, analyzedPkg := graph.AnalyzeDependencyGraphs(srcG, sbomG, card.Findings)
+		card.SourceGraph = analyzedSrc
+		card.PackageGraph = analyzedPkg
 	}
 
 	if *urlFlag != "" && hasStage("dast") {
-		if dFindings, err := dast.RunDASTSuite(ctx, *urlFlag, m.OpenAPIURL, execMode, nil); err == nil {
-			card.Findings = append(card.Findings, dFindings...)
+		dFindings, err := dast.RunDASTSuite(ctx, *urlFlag, m.OpenAPIURL, execMode, nil)
+		if err != nil {
+			stageErrors = append(stageErrors, fmt.Sprintf("DAST stage execution error: %v", err))
 		}
+		card.Findings = append(card.Findings, dFindings...)
 	}
 
 	if *urlFlag != "" && hasStage("pentest") {
-		if ptResults, err := pentest.RunAutomatedPenTestSuite(ctx, *urlFlag, m, cfg.MockUpstreamPort); err == nil {
-			card.PenTestResults = ptResults
+		ptResults, err := pentest.RunAutomatedPenTestSuite(ctx, *urlFlag, m, cfg.MockUpstreamPort)
+		if err != nil {
+			stageErrors = append(stageErrors, fmt.Sprintf("Pen-Test stage execution error: %v", err))
 		}
+		card.PenTestResults = ptResults
 	}
 
 	if *urlFlag != "" && hasStage("load") {
-		if summary, err := load.RunK6LoadTest(ctx, m, *urlFlag, load.LoadProfile(*profileFlag), execMode, nil); err == nil {
+		memCtx, cancelMem := context.WithCancel(ctx)
+		memCh := make(chan *types.MemoryLeakAnalysis, 1)
+		go func() {
+			memCh <- load.SampleDockerContainerMemory(memCtx, 2*time.Second, pol.MaxMemoryDriftPercent)
+		}()
+
+		summary, err := load.RunK6LoadTest(ctx, m, *urlFlag, load.LoadProfile(*profileFlag), execMode, nil)
+		cancelMem()
+		card.MemoryAnalysis = <-memCh
+
+		if err != nil {
+			stageErrors = append(stageErrors, fmt.Sprintf("Load-Test stage execution error: %v", err))
+			card.LoadTest = &types.LoadTestSummary{
+				Profile: string(*profileFlag),
+				Passed:  false,
+			}
+		} else {
 			card.LoadTest = summary
 		}
 	}
 
-	polRes := policy.EvaluateSecurityPolicy(card, policy.StrictSecurityPolicy())
+	polRes := policy.EvaluateSecurityPolicy(card, pol)
+	if len(stageErrors) > 0 {
+		polRes.Passed = false
+		polRes.Violations = append(polRes.Violations, stageErrors...)
+	}
+
 	targetOutDir := filepath.Join(*outputFlag, card.TargetName)
 	paths, err := report.WriteReportBundle(targetOutDir, card, polRes)
 	if err != nil {

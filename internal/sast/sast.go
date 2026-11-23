@@ -19,6 +19,15 @@ func NormalizeRelativePath(rawPath, targetDir string) string {
 		td := filepath.ToSlash(strings.TrimRight(targetDir, "/"))
 		if strings.HasPrefix(p, td+"/") {
 			p = strings.TrimPrefix(p, td+"/")
+		} else if abs, err := filepath.Abs(targetDir); err == nil {
+			absSlash := filepath.ToSlash(strings.TrimRight(abs, "/"))
+			if strings.HasPrefix(p, absSlash+"/") {
+				p = strings.TrimPrefix(p, absSlash+"/")
+			} else if base := filepath.Base(absSlash); base != "" && base != "." && base != "/" {
+				if idx := strings.Index(p, "/"+base+"/"); idx >= 0 {
+					p = p[idx+len(base)+2:]
+				}
+			}
 		}
 	}
 	p = strings.TrimPrefix(p, "./")
@@ -207,48 +216,65 @@ func ParseTrivyFSOutput(rawJSON []byte, targetDir string) ([]types.SecurityFindi
 func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMode, execFn runner.CommandExecutor) ([]types.SecurityFinding, error) {
 	var all []types.SecurityFinding
 
-	scanPath := targetDir
-	if mode == runner.ModeDocker {
-		scanPath = "/workspace"
+	scanPathFor := func(tool runner.ToolName) string {
+		if runner.ResolveEffectiveMode(mode, tool) == runner.ModeDocker {
+			return "/workspace"
+		}
+		return targetDir
 	}
 
 	semgrepRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolSemgrep,
-		Args:             []string{"scan", "--config", "auto", "--json", "--quiet", scanPath},
+		Args:             []string{"scan", "--config", "auto", "--json", "--quiet", scanPathFor(runner.ToolSemgrep)},
 		TargetDir:        targetDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
 	}, execFn)
-	if err == nil && strings.TrimSpace(semgrepRes.Stdout) != "" {
-		if f, pErr := ParseSemgrepOutput([]byte(semgrepRes.Stdout), targetDir); pErr == nil {
-			all = append(all, f...)
+	if err != nil {
+		return nil, fmt.Errorf("semgrep execution failed: %w", err)
+	}
+	if strings.TrimSpace(semgrepRes.Stdout) != "" {
+		f, pErr := ParseSemgrepOutput([]byte(semgrepRes.Stdout), targetDir)
+		if pErr != nil {
+			return nil, pErr
 		}
+		all = append(all, f...)
 	}
 
 	gitleaksRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolGitleaks,
-		Args:             []string{"detect", "--source", scanPath, "--no-git", "--report-format", "json", "--report-path", "-"},
+		Args:             []string{"detect", "--source", scanPathFor(runner.ToolGitleaks), "--no-git", "--report-format", "json", "--report-path", "-"},
 		TargetDir:        targetDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
 	}, execFn)
-	if err == nil && strings.TrimSpace(gitleaksRes.Stdout) != "" {
-		if f, pErr := ParseGitleaksOutput([]byte(gitleaksRes.Stdout), targetDir); pErr == nil {
-			all = append(all, f...)
+	if err != nil {
+		return nil, fmt.Errorf("gitleaks execution failed: %w", err)
+	}
+	if strings.TrimSpace(gitleaksRes.Stdout) != "" {
+		f, pErr := ParseGitleaksOutput([]byte(gitleaksRes.Stdout), targetDir)
+		if pErr != nil {
+			return nil, pErr
 		}
+		all = append(all, f...)
 	}
 
 	trivyRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolTrivy,
-		Args:             []string{"fs", "--scanners", "vuln,misconfig,secret", "--format", "json", "--quiet", scanPath},
+		Args:             []string{"fs", "--scanners", "vuln,misconfig,secret", "--format", "json", "--quiet", scanPathFor(runner.ToolTrivy)},
 		TargetDir:        targetDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
 	}, execFn)
-	if err == nil && strings.TrimSpace(trivyRes.Stdout) != "" {
-		if f, pErr := ParseTrivyFSOutput([]byte(trivyRes.Stdout), targetDir); pErr == nil {
-			all = append(all, f...)
+	if err != nil {
+		return nil, fmt.Errorf("trivy execution failed: %w", err)
+	}
+	if strings.TrimSpace(trivyRes.Stdout) != "" {
+		f, pErr := ParseTrivyFSOutput([]byte(trivyRes.Stdout), targetDir)
+		if pErr != nil {
+			return nil, pErr
 		}
+		all = append(all, f...)
 	}
 
 	return all, nil

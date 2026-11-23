@@ -125,7 +125,8 @@ func RunK6LoadTest(ctx context.Context, m types.BoilerplateManifest, baseURL str
 	defer os.RemoveAll(tmpDir)
 
 	targetBase := baseURL
-	if mode == runner.ModeDocker {
+	effectiveMode := runner.ResolveEffectiveMode(mode, runner.ToolK6)
+	if effectiveMode == runner.ModeDocker {
 		targetBase = runner.RewriteURLForDocker(baseURL)
 	}
 
@@ -138,14 +139,14 @@ func RunK6LoadTest(ctx context.Context, m types.BoilerplateManifest, baseURL str
 
 	argScript := scriptPath
 	argSummary := summaryPath
-	if mode == runner.ModeDocker {
+	if effectiveMode == runner.ModeDocker {
 		argScript = "/out/load.js"
 		argSummary = "/out/summary.json"
 	}
 
-	_, err = runner.RunTool(ctx, runner.ToolInvocationOptions{
+	k6Res, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolK6,
-		Args:             []string{"run", "--summary-export", argSummary, argScript},
+		Args:             []string{"run", "--summary-trend-stats", "avg,min,med,max,p(90),p(95),p(99)", "--summary-export", argSummary, argScript},
 		WorkDir:          tmpDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 99},
@@ -161,6 +162,9 @@ func RunK6LoadTest(ctx context.Context, m types.BoilerplateManifest, baseURL str
 	s, err := ParseK6SummaryJSON(rawSummary, profile)
 	if err != nil {
 		return nil, err
+	}
+	if k6Res.ExitCode == 99 {
+		s.Passed = false
 	}
 	return &s, nil
 }

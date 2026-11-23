@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -109,6 +111,7 @@ func mapNucleiSeverity(raw string) types.Severity {
 
 func ParseNucleiJSONLOutput(rawJSONL []byte) ([]types.SecurityFinding, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(rawJSONL))
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var findings []types.SecurityFinding
 	idx := 0
 	for scanner.Scan() {
@@ -130,6 +133,9 @@ func ParseNucleiJSONLOutput(rawJSONL []byte) ([]types.SecurityFinding, error) {
 			Description: item.Info.Description,
 			Endpoint:    item.MatchedAt,
 		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan nuclei jsonl: %w", err)
 	}
 	return findings, nil
 }
@@ -169,55 +175,91 @@ func ParseSchemathesisOutput(stdout string, exitCode int) []types.SecurityFindin
 
 func RunDASTSuite(ctx context.Context, baseURL string, openapiURL string, mode runner.ExecutionMode, execFn runner.CommandExecutor) ([]types.SecurityFinding, error) {
 	var all []types.SecurityFinding
-	targetBase := strings.TrimRight(baseURL, "/")
-	if mode == runner.ModeDocker {
-		targetBase = runner.RewriteURLForDocker(targetBase)
+
+	targetURLFor := func(tool runner.ToolName, raw string) string {
+		u := strings.TrimRight(raw, "/")
+		if runner.ResolveEffectiveMode(mode, tool) == runner.ModeDocker {
+			return runner.RewriteURLForDocker(u)
+		}
+		return u
 	}
 
-	fullOpenAPI := openapiURL
-	if fullOpenAPI != "" && !strings.HasPrefix(fullOpenAPI, "http://") && !strings.HasPrefix(fullOpenAPI, "https://") {
-		if !strings.HasPrefix(fullOpenAPI, "/") {
-			fullOpenAPI = "/" + fullOpenAPI
+	openAPIFor := func(tool runner.ToolName) string {
+		if openapiURL == "" {
+			return ""
 		}
-		fullOpenAPI = targetBase + fullOpenAPI
-	} else if mode == runner.ModeDocker && fullOpenAPI != "" {
-		fullOpenAPI = runner.RewriteURLForDocker(fullOpenAPI)
+		full := openapiURL
+		if !strings.HasPrefix(full, "http://") && !strings.HasPrefix(full, "https://") {
+			if !strings.HasPrefix(full, "/") {
+				full = "/" + full
+			}
+			full = strings.TrimRight(baseURL, "/") + full
+		}
+		return targetURLFor(tool, full)
 	}
 
 	nucleiRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolNuclei,
-		Args:             []string{"-u", targetBase, "-jsonl", "-silent"},
+		Args:             []string{"-u", targetURLFor(runner.ToolNuclei, baseURL), "-jsonl", "-silent"},
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
 	}, execFn)
-	if err == nil && strings.TrimSpace(nucleiRes.Stdout) != "" {
-		if f, pErr := ParseNucleiJSONLOutput([]byte(nucleiRes.Stdout)); pErr == nil {
-			all = append(all, f...)
+	if err != nil {
+		return nil, fmt.Errorf("nuclei execution failed: %w", err)
+	}
+	if strings.TrimSpace(nucleiRes.Stdout) != "" {
+		f, pErr := ParseNucleiJSONLOutput([]byte(nucleiRes.Stdout))
+		if pErr != nil {
+			return nil, pErr
 		}
+		all = append(all, f...)
 	}
 
-	if fullOpenAPI != "" {
+	if openapiURL != "" {
+		tmpDir, tErr := os.MkdirTemp("", "zap-conformance-*")
+		if tErr != nil {
+			return nil, tErr
+		}
+		defer os.RemoveAll(tmpDir)
+
+		zapReportFile := filepath.Join(tmpDir, "zap-report.json")
+		zapReportArg := zapReportFile
+		if runner.ResolveEffectiveMode(mode, runner.ToolZAP) == runner.ModeDocker {
+			zapReportArg = "zap-report.json" // written inside /zap/wrk
+		}
+
 		zapRes, zErr := runner.RunTool(ctx, runner.ToolInvocationOptions{
 			Tool:             runner.ToolZAP,
-			Args:             []string{"zap-api-scan.py", "-t", fullOpenAPI, "-f", "openapi", "-J", "-"},
+			Args:             []string{"zap-api-scan.py", "-t", openAPIFor(runner.ToolZAP), "-f", "openapi", "-J", zapReportArg},
+			WorkDir:          tmpDir,
 			Mode:             mode,
 			AllowedExitCodes: []int{0, 1, 2},
 		}, execFn)
-		if zErr == nil && strings.TrimSpace(zapRes.Stdout) != "" {
-			if f, pErr := ParseZAPJSONOutput([]byte(zapRes.Stdout)); pErr == nil {
-				all = append(all, f...)
+		if zErr != nil {
+			return nil, fmt.Errorf("zap execution failed: %w", zErr)
+		}
+		rawZAP, readErr := os.ReadFile(zapReportFile)
+		if readErr != nil || len(rawZAP) == 0 {
+			rawZAP = []byte(zapRes.Stdout)
+		}
+		if len(strings.TrimSpace(string(rawZAP))) > 0 {
+			f, pErr := ParseZAPJSONOutput(rawZAP)
+			if pErr != nil {
+				return nil, pErr
 			}
+			all = append(all, f...)
 		}
 
 		schemaRes, sErr := runner.RunTool(ctx, runner.ToolInvocationOptions{
 			Tool:             runner.ToolSchemathesis,
-			Args:             []string{"run", fullOpenAPI, "--checks", "all"},
+			Args:             []string{"run", openAPIFor(runner.ToolSchemathesis), "--checks", "all"},
 			Mode:             mode,
 			AllowedExitCodes: []int{0, 1},
 		}, execFn)
-		if sErr == nil {
-			all = append(all, ParseSchemathesisOutput(schemaRes.Stdout, schemaRes.ExitCode)...)
+		if sErr != nil {
+			return nil, fmt.Errorf("schemathesis execution failed: %w", sErr)
 		}
+		all = append(all, ParseSchemathesisOutput(schemaRes.Stdout, schemaRes.ExitCode)...)
 	}
 
 	return all, nil

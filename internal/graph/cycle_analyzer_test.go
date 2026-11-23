@@ -82,4 +82,19 @@ func TestTarjanCycleDetectorAndSBOMOverlay(t *testing.T) {
 	if len(analyzedSBOM.Cycles) != 1 || !analyzedSBOM.Cycles[0].IsToxic {
 		t.Fatalf("expected toxic SBOM package cycle, got %+v", analyzedSBOM.Cycles)
 	}
+
+	// Verify long cycle (>= 13 nodes) is still detected via fallback
+	var longNodes []types.GraphNode
+	var longEdges []types.GraphEdge
+	for i := 0; i < 14; i++ {
+		id := "n" + string(rune('a'+i))
+		next := "n" + string(rune('a'+((i+1)%14)))
+		longNodes = append(longNodes, types.GraphNode{ID: id, Label: id, Type: "module"})
+		longEdges = append(longEdges, types.GraphEdge{From: id, To: next, Kind: "import"})
+	}
+	longCycles := graph.FindGraphCycles(types.DependencyGraph{Nodes: longNodes, Edges: longEdges}, "source", nil)
+	if len(longCycles) == 0 {
+		t.Fatalf("expected cycle of length 14 to be detected, got 0 cycles")
+	}
 }
+

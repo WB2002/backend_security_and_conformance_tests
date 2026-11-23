@@ -89,4 +89,14 @@ func TestReportBundleGeneration(t *testing.T) {
 	if strings.Contains(htmlStr, `<script>alert("xss")</script>`) || !strings.Contains(htmlStr, "&lt;script&gt;") {
 		t.Fatalf("expected HTML escaping of finding title in dashboard.html")
 	}
+	if !strings.Contains(htmlStr, "cytoscape") {
+		t.Fatalf("expected interactive Cytoscape graph viewer in dashboard.html")
+	}
+
+	// Empty findings SARIF must have "results": [] (not null)
+	emptySarif, err := report.GenerateSARIFReport(types.ConformanceScorecard{TargetName: "clean"})
+	if err != nil || strings.Contains(string(emptySarif), `"results": null`) {
+		t.Fatalf("expected non-null empty results array in SARIF: %s", string(emptySarif))
+	}
 }
+

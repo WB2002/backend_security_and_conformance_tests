@@ -50,3 +50,25 @@ func TestHybridToolRunner(t *testing.T) {
 		t.Fatalf("expected exit code 1 to be treated as non-fatal OK when allowed: res=%+v err=%v", res, err)
 	}
 }
+
+func TestResolveModeAndRelativeMount(t *testing.T) {
+	cmd, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
+		Tool:      runner.ToolSemgrep,
+		Args:      []string{"scan", "/workspace"},
+		TargetDir: ".",
+		WorkDir:   ".",
+		Mode:      runner.ModeDocker,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for i, a := range cmd.Args {
+		if a == "-v" && i+1 < len(cmd.Args) {
+			mount := cmd.Args[i+1]
+			if mount[0] != '/' {
+				t.Fatalf("expected absolute host path in docker volume mount, got %s", mount)
+			}
+		}
+	}
+}
+

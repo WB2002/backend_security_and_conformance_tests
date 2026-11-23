@@ -1,12 +1,16 @@
 package graph
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
+	"github.com/pc/backend-boilerplate-conformance-tests/internal/runner"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
 )
 
@@ -180,3 +184,51 @@ func ParseCycloneDXSBOMGraph(cdxJSON []byte, osvJSON []byte) (types.DependencyGr
 
 	return g, findings, nil
 }
+
+func RunSBOMAndOSVScan(ctx context.Context, targetDir string, mode runner.ExecutionMode, execFn runner.CommandExecutor) (types.DependencyGraph, []types.SecurityFinding, error) {
+	tmpDir, err := os.MkdirTemp("", "sbom-conformance-*")
+	if err != nil {
+		return types.DependencyGraph{}, nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sbomHostPath := filepath.Join(tmpDir, "bom.json")
+	sbomArgPath := sbomHostPath
+	scanTarget := targetDir
+	if runner.ResolveEffectiveMode(mode, runner.ToolCdxgen) == runner.ModeDocker {
+		sbomArgPath = "/out/bom.json"
+		scanTarget = "/workspace"
+	}
+
+	_, err = runner.RunTool(ctx, runner.ToolInvocationOptions{
+		Tool:             runner.ToolCdxgen,
+		Args:             []string{"-r", "-o", sbomArgPath, scanTarget},
+		TargetDir:        targetDir,
+		WorkDir:          tmpDir,
+		Mode:             mode,
+		AllowedExitCodes: []int{0, 1},
+	}, execFn)
+	if err != nil {
+		return types.DependencyGraph{}, nil, fmt.Errorf("cdxgen execution failed: %w", err)
+	}
+
+	cdxBytes, _ := os.ReadFile(sbomHostPath)
+
+	osvTarget := targetDir
+	if runner.ResolveEffectiveMode(mode, runner.ToolOSVScanner) == runner.ModeDocker {
+		osvTarget = "/workspace"
+	}
+	osvRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
+		Tool:             runner.ToolOSVScanner,
+		Args:             []string{"scan", "--format", "json", "-r", osvTarget},
+		TargetDir:        targetDir,
+		Mode:             mode,
+		AllowedExitCodes: []int{0, 1},
+	}, execFn)
+	if err != nil {
+		return types.DependencyGraph{}, nil, fmt.Errorf("osv-scanner execution failed: %w", err)
+	}
+
+	return ParseCycloneDXSBOMGraph(cdxBytes, []byte(osvRes.Stdout))
+}
+

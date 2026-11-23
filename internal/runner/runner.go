@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -93,15 +94,24 @@ func RewriteURLForDocker(rawURL string) string {
 	return u.String()
 }
 
-func resolveMode(mode ExecutionMode, spec toolSpec) ExecutionMode {
+func ResolveEffectiveMode(mode ExecutionMode, tool ToolName) ExecutionMode {
 	if mode == ModeDocker || mode == ModeLocal {
 		return mode
 	}
+	spec := toolRegistry[tool]
 	if _, err := exec.LookPath("docker"); err == nil {
+		if _, localErr := exec.LookPath(spec.LocalBinary); localErr == nil {
+			// If local binary also exists, verify docker daemon is reachable before choosing docker
+			if err := exec.Command("docker", "info").Run(); err != nil {
+				return ModeLocal
+			}
+		}
 		return ModeDocker
 	}
-	if _, err := exec.LookPath(spec.LocalBinary); err == nil {
-		return ModeLocal
+	if spec.LocalBinary != "" {
+		if _, err := exec.LookPath(spec.LocalBinary); err == nil {
+			return ModeLocal
+		}
 	}
 	return ModeDocker
 }
@@ -111,7 +121,7 @@ func BuildToolInvocation(opts ToolInvocationOptions) (ResolvedCommand, error) {
 	if !ok {
 		return ResolvedCommand{}, fmt.Errorf("unknown tool %q", opts.Tool)
 	}
-	effectiveMode := resolveMode(opts.Mode, spec)
+	effectiveMode := ResolveEffectiveMode(opts.Mode, opts.Tool)
 	if effectiveMode == ModeLocal {
 		return ResolvedCommand{
 			Binary: spec.LocalBinary,
@@ -122,10 +132,22 @@ func BuildToolInvocation(opts ToolInvocationOptions) (ResolvedCommand, error) {
 
 	dockerArgs := []string{"run", "--rm", "--add-host=host.docker.internal:host-gateway"}
 	if opts.TargetDir != "" {
-		dockerArgs = append(dockerArgs, "-v", fmt.Sprintf("%s:/workspace:ro", opts.TargetDir))
+		absTarget := opts.TargetDir
+		if abs, err := filepath.Abs(opts.TargetDir); err == nil {
+			absTarget = abs
+		}
+		dockerArgs = append(dockerArgs, "-v", fmt.Sprintf("%s:/workspace:ro", absTarget))
 	}
 	if opts.WorkDir != "" {
-		dockerArgs = append(dockerArgs, "-v", fmt.Sprintf("%s:/out:rw", opts.WorkDir))
+		absWork := opts.WorkDir
+		if abs, err := filepath.Abs(opts.WorkDir); err == nil {
+			absWork = abs
+		}
+		mountTarget := "/out"
+		if opts.Tool == ToolZAP {
+			mountTarget = "/zap/wrk"
+		}
+		dockerArgs = append(dockerArgs, "-v", fmt.Sprintf("%s:%s:rw", absWork, mountTarget))
 	}
 	for _, kv := range opts.Env {
 		dockerArgs = append(dockerArgs, "-e", kv)
