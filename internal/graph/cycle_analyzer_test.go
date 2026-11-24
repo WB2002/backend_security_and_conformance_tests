@@ -98,3 +98,64 @@ func TestTarjanCycleDetectorAndSBOMOverlay(t *testing.T) {
 	}
 }
 
+func TestFilterPeerDependencyEdgesEliminatesPeerCyclesButKeepsHardCycles(t *testing.T) {
+	pnpmLock := []byte(`lockfileVersion: '9.0'
+packages:
+  '@eslint-community/eslint-utils@4.9.1':
+    resolution: {integrity: sha512-abc}
+    peerDependencies:
+      eslint: ^6.0.0 || ^7.0.0 || >=8.0.0
+
+  pg-pool@3.11.0:
+    resolution: {integrity: sha512-def}
+    peerDependencies:
+      pg: '>=8.0'
+
+  pkg-a@1.0.0:
+    resolution: {integrity: sha512-ghi}
+
+  pkg-b@2.0.0:
+    resolution: {integrity: sha512-jkl}
+`)
+
+	peerDeps := graph.ParsePnpmLockPeerDependencies(pnpmLock)
+	if !peerDeps["pg-pool@3.11.0"]["pg"] {
+		t.Fatalf("expected pg-pool@3.11.0 to have peerDependency pg, got %+v", peerDeps)
+	}
+	if !peerDeps["@eslint-community/eslint-utils@4.9.1"]["eslint"] {
+		t.Fatalf("expected @eslint-community/eslint-utils@4.9.1 to have peerDependency eslint, got %+v", peerDeps)
+	}
+
+	cdx := []byte(`{
+  "components": [
+    { "bom-ref": "pkg:npm/pg@8.18.0", "name": "pg", "version": "8.18.0" },
+    { "bom-ref": "pkg:npm/pg-pool@3.11.0", "name": "pg-pool", "version": "3.11.0" },
+    { "bom-ref": "pkg:npm/%40eslint-community/eslint-utils@4.9.1", "name": "@eslint-community/eslint-utils", "version": "4.9.1" },
+    { "bom-ref": "pkg:npm/eslint@9.39.2", "name": "eslint", "version": "9.39.2" },
+    { "bom-ref": "pkg:npm/pkg-a@1.0.0", "name": "pkg-a", "version": "1.0.0" },
+    { "bom-ref": "pkg:npm/pkg-b@2.0.0", "name": "pkg-b", "version": "2.0.0" }
+  ],
+  "dependencies": [
+    { "ref": "pkg:npm/pg@8.18.0", "dependsOn": ["pkg:npm/pg-pool@3.11.0"] },
+    { "ref": "pkg:npm/pg-pool@3.11.0", "dependsOn": ["pkg:npm/pg@8.18.0"] },
+    { "ref": "pkg:npm/eslint@9.39.2", "dependsOn": ["pkg:npm/%40eslint-community/eslint-utils@4.9.1"] },
+    { "ref": "pkg:npm/%40eslint-community/eslint-utils@4.9.1", "dependsOn": ["pkg:npm/eslint@9.39.2"] },
+    { "ref": "pkg:npm/pkg-a@1.0.0", "dependsOn": ["pkg:npm/pkg-b@2.0.0"] },
+    { "ref": "pkg:npm/pkg-b@2.0.0", "dependsOn": ["pkg:npm/pkg-a@1.0.0"] }
+  ]
+}`)
+
+	sbomG, _, err := graph.ParseCycloneDXSBOMGraph(cdx, nil)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	filtered := graph.FilterPeerDependencyEdges(sbomG, peerDeps)
+	cycles := graph.FindGraphCycles(filtered, "package", nil)
+	if len(cycles) != 1 {
+		t.Fatalf("expected exactly 1 real cycle (pkg-a <-> pkg-b), got %d: %+v", len(cycles), cycles)
+	}
+	if cycles[0].Nodes[0] != "pkg:npm/pkg-a@1.0.0" || cycles[0].Nodes[1] != "pkg:npm/pkg-b@2.0.0" {
+		t.Fatalf("unexpected remaining cycle: %+v", cycles[0])
+	}
+}
+

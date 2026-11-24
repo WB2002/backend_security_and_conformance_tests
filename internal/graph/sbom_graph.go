@@ -1,9 +1,11 @@
 package graph
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -232,6 +234,203 @@ func RunSBOMAndOSVScan(ctx context.Context, targetDir string, mode runner.Execut
 		return types.DependencyGraph{}, nil, fmt.Errorf("osv-scanner execution failed: %w", err)
 	}
 
-	return ParseCycloneDXSBOMGraph(cdxBytes, []byte(osvRes.Stdout))
+	g, findings, err := ParseCycloneDXSBOMGraph(cdxBytes, []byte(osvRes.Stdout))
+	if err != nil {
+		return g, findings, err
+	}
+
+	peerDeps := LoadNPMPeerDependencies(targetDir)
+	if len(peerDeps) > 0 {
+		g = FilterPeerDependencyEdges(g, peerDeps)
+	}
+
+	return g, findings, nil
+}
+
+// parseNPMPurl extracts (packageName, version) from a CycloneDX npm PURL such as
+// "pkg:npm/@eslint-community/eslint-utils@4.9.1" or "pkg:npm/pg-pool@3.11.0".
+func parseNPMPurl(ref string) (string, string, bool) {
+	if !strings.HasPrefix(ref, "pkg:npm/") {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(ref, "pkg:npm/")
+	if idx := strings.IndexAny(rest, "?#"); idx >= 0 {
+		rest = rest[:idx]
+	}
+	if decoded, err := url.PathUnescape(rest); err == nil {
+		rest = decoded
+	}
+	at := strings.LastIndex(rest, "@")
+	if at <= 0 {
+		return rest, "", rest != ""
+	}
+	return rest[:at], rest[at+1:], true
+}
+
+func unquoteYAMLKey(raw string) string {
+	s := strings.TrimSpace(raw)
+	if len(s) >= 2 && ((s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"')) {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+func parsePnpmPackageKey(rawKey string) (string, string) {
+	key := strings.TrimPrefix(unquoteYAMLKey(rawKey), "/")
+	// Strip pnpm peer-resolution suffix e.g. "pg-pool@3.11.0(pg@8.18.0)"
+	if idx := strings.Index(key, "("); idx >= 0 {
+		key = key[:idx]
+	}
+	at := strings.LastIndex(key, "@")
+	if at <= 0 {
+		return key, ""
+	}
+	return key[:at], key[at+1:]
+}
+
+// ParsePnpmLockPeerDependencies extracts peerDependencies declared under the
+// top-level `packages:` section of a pnpm-lock.yaml (v6/v9).
+// Returns map["pkgName@version"] -> set of peer dependency package names.
+func ParsePnpmLockPeerDependencies(content []byte) map[string]map[string]bool {
+	result := make(map[string]map[string]bool)
+	scanner := bufio.NewScanner(strings.NewReader(string(content)))
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 2*1024*1024)
+
+	inPackages := false
+	inPeerDeps := false
+	currentPkgKey := ""
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent == 0 {
+			inPackages = strings.HasPrefix(trimmed, "packages:")
+			inPeerDeps = false
+			currentPkgKey = ""
+			continue
+		}
+		if !inPackages {
+			continue
+		}
+
+		if indent == 2 && strings.HasSuffix(trimmed, ":") {
+			name, ver := parsePnpmPackageKey(strings.TrimSuffix(trimmed, ":"))
+			if name != "" && ver != "" {
+				currentPkgKey = name + "@" + ver
+			} else {
+				currentPkgKey = ""
+			}
+			inPeerDeps = false
+			continue
+		}
+
+		if indent == 4 {
+			inPeerDeps = trimmed == "peerDependencies:"
+			continue
+		}
+
+		if inPeerDeps && indent == 6 && currentPkgKey != "" {
+			if colon := strings.Index(trimmed, ":"); colon > 0 {
+				peerName := unquoteYAMLKey(trimmed[:colon])
+				if peerName != "" {
+					if result[currentPkgKey] == nil {
+						result[currentPkgKey] = make(map[string]bool)
+					}
+					result[currentPkgKey][peerName] = true
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+type packageLockDoc struct {
+	Packages map[string]struct {
+		Name             string            `json:"name"`
+		Version          string            `json:"version"`
+		PeerDependencies map[string]string `json:"peerDependencies"`
+	} `json:"packages"`
+}
+
+// ParsePackageLockPeerDependencies extracts peerDependencies from npm package-lock.json (v2/v3).
+func ParsePackageLockPeerDependencies(content []byte) map[string]map[string]bool {
+	var doc packageLockDoc
+	if err := json.Unmarshal(content, &doc); err != nil {
+		return nil
+	}
+	result := make(map[string]map[string]bool)
+	for path, pkg := range doc.Packages {
+		if len(pkg.PeerDependencies) == 0 || pkg.Version == "" {
+			continue
+		}
+		name := pkg.Name
+		if name == "" {
+			if idx := strings.LastIndex(path, "node_modules/"); idx >= 0 {
+				name = path[idx+len("node_modules/"):]
+			}
+		}
+		if name == "" {
+			continue
+		}
+		key := name + "@" + pkg.Version
+		if result[key] == nil {
+			result[key] = make(map[string]bool)
+		}
+		for peerName := range pkg.PeerDependencies {
+			result[key][peerName] = true
+		}
+	}
+	return result
+}
+
+// LoadNPMPeerDependencies loads peerDependencies from pnpm-lock.yaml or package-lock.json in targetDir.
+func LoadNPMPeerDependencies(targetDir string) map[string]map[string]bool {
+	merged := make(map[string]map[string]bool)
+	merge := func(src map[string]map[string]bool) {
+		for k, peers := range src {
+			if merged[k] == nil {
+				merged[k] = make(map[string]bool)
+			}
+			for p := range peers {
+				merged[k][p] = true
+			}
+		}
+	}
+
+	if data, err := os.ReadFile(filepath.Join(targetDir, "pnpm-lock.yaml")); err == nil {
+		merge(ParsePnpmLockPeerDependencies(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(targetDir, "package-lock.json")); err == nil {
+		merge(ParsePackageLockPeerDependencies(data))
+	}
+	return merged
+}
+
+// FilterPeerDependencyEdges removes edges where the source package declares the target package
+// as a peerDependency (host-provided contract rather than a hard runtime dependency).
+func FilterPeerDependencyEdges(g types.DependencyGraph, peerDeps map[string]map[string]bool) types.DependencyGraph {
+	if len(peerDeps) == 0 || len(g.Edges) == 0 {
+		return g
+	}
+	filtered := make([]types.GraphEdge, 0, len(g.Edges))
+	for _, e := range g.Edges {
+		fromName, fromVer, fromOK := parseNPMPurl(e.From)
+		toName, _, toOK := parseNPMPurl(e.To)
+		if fromOK && toOK && fromVer != "" {
+			if peers := peerDeps[fromName+"@"+fromVer]; peers[toName] {
+				continue
+			}
+		}
+		filtered = append(filtered, e)
+	}
+	g.Edges = filtered
+	return g
 }
 
