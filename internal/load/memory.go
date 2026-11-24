@@ -79,7 +79,11 @@ func AnalyzeMemorySamples(samples []types.MemorySample, maxAllowedDriftPercent f
 	}
 }
 
-func SampleDockerContainerMemory(ctx context.Context, interval time.Duration, maxDriftPercent float64) *types.MemoryLeakAnalysis {
+func SampleDockerContainerMemory(ctx context.Context, containerName string, interval time.Duration, maxDriftPercent float64) *types.MemoryLeakAnalysis {
+	containerName = strings.TrimSpace(containerName)
+	if containerName == "" {
+		return nil
+	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		return nil
 	}
@@ -88,7 +92,7 @@ func SampleDockerContainerMemory(ctx context.Context, interval time.Duration, ma
 	defer ticker.Stop()
 
 	collectOnce := func() {
-		out, err := exec.CommandContext(ctx, "docker", "stats", "--no-stream", "--format", "{{.MemUsage}}\t{{.CPUPerc}}").Output()
+		out, err := exec.CommandContext(ctx, "docker", "stats", "--no-stream", "--format", "{{.MemUsage}}\t{{.CPUPerc}}", containerName).Output()
 		if err != nil {
 			return
 		}
@@ -108,6 +112,58 @@ func SampleDockerContainerMemory(ctx context.Context, interval time.Duration, ma
 		samples = append(samples, types.MemorySample{
 			TimestampMs: time.Now().UnixMilli(),
 			RSSBytes:    rss,
+			CPUPercent:  cpu,
+		})
+	}
+
+	collectOnce()
+	for {
+		select {
+		case <-ctx.Done():
+			collectOnce()
+			if len(samples) == 0 {
+				return nil
+			}
+			res := AnalyzeMemorySamples(samples, maxDriftPercent)
+			return &res
+		case <-ticker.C:
+			collectOnce()
+		}
+	}
+}
+
+func SampleProcessMemory(ctx context.Context, pid int, interval time.Duration, maxDriftPercent float64) *types.MemoryLeakAnalysis {
+	if pid <= 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("ps"); err != nil {
+		return nil
+	}
+	var samples []types.MemorySample
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	pidStr := strconv.Itoa(pid)
+	collectOnce := func() {
+		out, err := exec.CommandContext(ctx, "ps", "-o", "rss=,%cpu=", "-p", pidStr).Output()
+		if err != nil {
+			return
+		}
+		fields := strings.Fields(strings.TrimSpace(string(out)))
+		if len(fields) == 0 {
+			return
+		}
+		rssKiB, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil || rssKiB <= 0 {
+			return
+		}
+		var cpu float64
+		if len(fields) > 1 {
+			cpu, _ = strconv.ParseFloat(fields[1], 64)
+		}
+		samples = append(samples, types.MemorySample{
+			TimestampMs: time.Now().UnixMilli(),
+			RSSBytes:    rssKiB * 1024,
 			CPUPercent:  cpu,
 		})
 	}

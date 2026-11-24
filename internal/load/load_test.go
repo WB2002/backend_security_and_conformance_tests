@@ -78,8 +78,8 @@ func TestRunK6LoadTest_DockerReadablePermissions(t *testing.T) {
 		if err != nil {
 			return runner.ToolExecutionResult{}, err
 		}
-		if dirInfo.Mode().Perm()&0o005 != 0o005 {
-			t.Fatalf("expected WorkDir %s to be world-readable/executable for docker k6 user, got %o", workDir, dirInfo.Mode().Perm())
+		if dirInfo.Mode().Perm()&0o007 != 0o007 {
+			t.Fatalf("expected WorkDir %s to be world-writable/readable/executable for docker k6 user, got %o", workDir, dirInfo.Mode().Perm())
 		}
 		scriptInfo, err := os.Stat(scriptPath)
 		if err != nil {
@@ -98,5 +98,9 @@ func TestRunK6LoadTest_DockerReadablePermissions(t *testing.T) {
 	_, err := load.RunK6LoadTest(context.Background(), m, "http://127.0.0.1:3000", load.ProfileBaseline, runner.ModeLocal, mockExec)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := load.SampleDockerContainerMemory(context.Background(), "", 0, 20.0); got != nil {
+		t.Fatalf("expected nil memory analysis when container name is empty, got %+v", got)
 	}
 }

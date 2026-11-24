@@ -191,6 +191,9 @@ func RunSBOMAndOSVScan(ctx context.Context, targetDir string, mode runner.Execut
 		return types.DependencyGraph{}, nil, err
 	}
 	defer os.RemoveAll(tmpDir)
+	if err := os.Chmod(tmpDir, 0o777); err != nil {
+		return types.DependencyGraph{}, nil, err
+	}
 
 	sbomHostPath := filepath.Join(tmpDir, "bom.json")
 	sbomArgPath := sbomHostPath

@@ -123,7 +123,7 @@ func RunK6LoadTest(ctx context.Context, m types.BoilerplateManifest, baseURL str
 		return nil, err
 	}
 	defer os.RemoveAll(tmpDir)
-	if err := os.Chmod(tmpDir, 0o755); err != nil {
+	if err := os.Chmod(tmpDir, 0o777); err != nil {
 		return nil, err
 	}
 

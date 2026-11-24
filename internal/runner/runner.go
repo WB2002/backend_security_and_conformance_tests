@@ -35,15 +35,16 @@ const (
 )
 
 type toolSpec struct {
-	LocalBinary string
-	DockerImage string
+	LocalBinary   string
+	DockerImage   string
+	DockerCommand []string
 }
 
 var toolRegistry = map[ToolName]toolSpec{
-	ToolSemgrep:      {LocalBinary: "semgrep", DockerImage: "semgrep/semgrep:1.102.0"},
+	ToolSemgrep:      {LocalBinary: "semgrep", DockerImage: "semgrep/semgrep:1.102.0", DockerCommand: []string{"semgrep"}},
 	ToolGitleaks:     {LocalBinary: "gitleaks", DockerImage: "zricethezav/gitleaks:v8.21.2"},
 	ToolTrivy:        {LocalBinary: "trivy", DockerImage: "aquasec/trivy:0.58.1"},
-	ToolCdxgen:       {LocalBinary: "cdxgen", DockerImage: "ghcr.io/cyclonedx/cdxgen:v11.1.0"},
+	ToolCdxgen:       {LocalBinary: "cdxgen", DockerImage: "ghcr.io/cyclonedx/cdxgen-node20:v11.1.0"},
 	ToolOSVScanner:   {LocalBinary: "osv-scanner", DockerImage: "ghcr.io/google/osv-scanner:v1.9.1"},
 	ToolZAP:          {LocalBinary: "zap.sh", DockerImage: "ghcr.io/zaproxy/zaproxy:stable"},
 	ToolNuclei:       {LocalBinary: "nuclei", DockerImage: "projectdiscovery/nuclei:v3.3.7"},
@@ -153,6 +154,7 @@ func BuildToolInvocation(opts ToolInvocationOptions) (ResolvedCommand, error) {
 		dockerArgs = append(dockerArgs, "-e", kv)
 	}
 	dockerArgs = append(dockerArgs, spec.DockerImage)
+	dockerArgs = append(dockerArgs, spec.DockerCommand...)
 	dockerArgs = append(dockerArgs, opts.Args...)
 
 	return ResolvedCommand{

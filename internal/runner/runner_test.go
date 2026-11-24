@@ -34,6 +34,24 @@ func TestHybridToolRunner(t *testing.T) {
 	if !slices.Contains(cmd.Args, "semgrep/semgrep:1.102.0") {
 		t.Fatalf("expected pinned semgrep image in %v", cmd.Args)
 	}
+	imgIdx := slices.Index(cmd.Args, "semgrep/semgrep:1.102.0")
+	if imgIdx < 0 || imgIdx+2 >= len(cmd.Args) || cmd.Args[imgIdx+1] != "semgrep" || cmd.Args[imgIdx+2] != "scan" {
+		t.Fatalf("expected docker semgrep invocation to prefix 'semgrep' before 'scan', got %v", cmd.Args)
+	}
+
+	cdxCmd, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
+		Tool:      runner.ToolCdxgen,
+		Args:      []string{"-r", "-o", "/out/bom.json", "/workspace"},
+		TargetDir: "/Users/pc/my-repo",
+		WorkDir:   "/tmp/out",
+		Mode:      runner.ModeDocker,
+	})
+	if err != nil {
+		t.Fatalf("unexpected cdxgen error: %v", err)
+	}
+	if !slices.Contains(cdxCmd.Args, "ghcr.io/cyclonedx/cdxgen-node20:v11.1.0") {
+		t.Fatalf("expected lightweight cdxgen-node20 image in %v", cdxCmd.Args)
+	}
 
 	res, err := runner.RunTool(context.Background(), runner.ToolInvocationOptions{
 		Tool:             runner.ToolGitleaks,

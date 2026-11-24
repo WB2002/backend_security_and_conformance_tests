@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,7 @@ func detectRepoLanguage(targetDir string) types.BoilerplateLanguage {
 func main() {
 	cfg := config.LoadConfig(os.Getenv)
 
+	defaultPID, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("CONFORMANCE_TARGET_PID")))
 	targetFlag := flag.String("target", "", "Path to target boilerplate source repository")
 	urlFlag := flag.String("url", cfg.BaseURL, "Running boilerplate Base URL")
 	manifestFlag := flag.String("manifest", "", "Path to boilerplate.manifest.json")
@@ -53,6 +55,8 @@ func main() {
 	profileFlag := flag.String("profile", string(load.ProfileBaseline), "k6 load profile (baseline|stress|soak)")
 	outputFlag := flag.String("output", "reports", "Output directory for 4-part report bundle")
 	modeFlag := flag.String("mode", string(runner.ModeAuto), "Tool execution mode (auto|docker|local)")
+	containerFlag := flag.String("container", os.Getenv("CONFORMANCE_TARGET_CONTAINER"), "Optional Docker container name/ID to sample for memory leak detection")
+	pidFlag := flag.Int("pid", defaultPID, "Optional host process PID to sample for memory leak detection")
 	flag.Parse()
 
 	targetDir := strings.TrimSpace(*targetFlag)
@@ -168,7 +172,13 @@ func main() {
 		memCtx, cancelMem := context.WithCancel(ctx)
 		memCh := make(chan *types.MemoryLeakAnalysis, 1)
 		go func() {
-			memCh <- load.SampleDockerContainerMemory(memCtx, 2*time.Second, pol.MaxMemoryDriftPercent)
+			if *pidFlag > 0 {
+				memCh <- load.SampleProcessMemory(memCtx, *pidFlag, 2*time.Second, pol.MaxMemoryDriftPercent)
+			} else if strings.TrimSpace(*containerFlag) != "" {
+				memCh <- load.SampleDockerContainerMemory(memCtx, *containerFlag, 2*time.Second, pol.MaxMemoryDriftPercent)
+			} else {
+				memCh <- nil
+			}
 		}()
 
 		summary, err := load.RunK6LoadTest(ctx, m, *urlFlag, load.LoadProfile(*profileFlag), execMode, nil)
