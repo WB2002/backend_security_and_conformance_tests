@@ -159,3 +159,44 @@ packages:
 	}
 }
 
+func TestParseCycloneDXSBOMGraphUpgradesOSVMalwareToCriticalMalwareCategory(t *testing.T) {
+	cdx := []byte(`{
+  "components": [
+    { "bom-ref": "pkg:npm/evil-pkg@1.0.0", "name": "evil-pkg", "version": "1.0.0" }
+  ],
+  "dependencies": []
+}`)
+	osv := []byte(`{
+  "results": [
+    {
+      "packages": [
+        {
+          "package": { "name": "evil-pkg", "version": "1.0.0", "ecosystem": "npm" },
+          "vulnerabilities": [
+            {
+              "id": "MAL-2026-9999",
+              "summary": "Malicious package exfiltrating env vars",
+              "database_specific": { "severity": "" }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}`)
+
+	_, findings, err := graph.ParseCycloneDXSBOMGraph(cdx, osv)
+	if err != nil {
+		t.Fatalf("ParseCycloneDXSBOMGraph failed: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %+v", len(findings), findings)
+	}
+	if findings[0].Category != types.CategoryMalware {
+		t.Fatalf("expected Category %q, got %q", types.CategoryMalware, findings[0].Category)
+	}
+	if findings[0].Severity != types.SeverityCritical {
+		t.Fatalf("expected Severity %q, got %q", types.SeverityCritical, findings[0].Severity)
+	}
+}
+

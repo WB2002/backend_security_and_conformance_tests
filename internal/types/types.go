@@ -23,13 +23,15 @@ const (
 type FindingCategory string
 
 const (
-	CategorySAST    FindingCategory = "sast"
-	CategorySecret  FindingCategory = "secret"
-	CategoryIaC     FindingCategory = "iac"
-	CategorySCA     FindingCategory = "sca"
-	CategoryDAST    FindingCategory = "dast"
-	CategoryPenTest FindingCategory = "pentest"
-	CategoryCycle   FindingCategory = "cycle"
+	CategorySAST        FindingCategory = "sast"
+	CategorySecret      FindingCategory = "secret"
+	CategoryIaC         FindingCategory = "iac"
+	CategorySCA         FindingCategory = "sca"
+	CategoryDAST        FindingCategory = "dast"
+	CategoryPenTest     FindingCategory = "pentest"
+	CategoryCycle       FindingCategory = "cycle"
+	CategoryMalware     FindingCategory = "malware"
+	CategorySupplyChain FindingCategory = "supply-chain"
 )
 
 type EndpointSpec struct {

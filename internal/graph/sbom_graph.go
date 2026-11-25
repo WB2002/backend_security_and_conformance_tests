@@ -146,11 +146,17 @@ func ParseCycloneDXSBOMGraph(cdxJSON []byte, osvJSON []byte) (types.DependencyGr
 				}
 				for _, v := range pkg.Vulnerabilities {
 					fID := fmt.Sprintf("osv-%s-%s", pkg.Package.Name, v.ID)
+					category := types.CategorySCA
+					severity := mapOSVSeverity(v.DatabaseSpecific.Severity)
+					if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(v.ID)), "MAL-") {
+						category = types.CategoryMalware
+						severity = types.SeverityCritical
+					}
 					findings = append(findings, types.SecurityFinding{
 						ID:          fID,
-						Category:    types.CategorySCA,
+						Category:    category,
 						Tool:        "osv-scanner",
-						Severity:    mapOSVSeverity(v.DatabaseSpecific.Severity),
+						Severity:    severity,
 						Title:       fmt.Sprintf("%s in %s@%s", v.ID, pkg.Package.Name, pkg.Package.Version),
 						Description: v.Summary,
 						CVE:         v.ID,
