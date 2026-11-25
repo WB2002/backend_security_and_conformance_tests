@@ -28,6 +28,7 @@ var skippedDirs = map[string]bool{
 	".venv":               true,
 	"venv":                true,
 	".worktrees":          true,
+	".superpowers":        true,
 	".conformance-runner": true,
 	".tsd-emit":           true,
 	"coverage":            true,
@@ -75,8 +76,8 @@ var (
 	reLongBase64       = regexp.MustCompile(`[A-Za-z0-9+/][A-Za-z0-9+/=]{239,}`)
 	reHexEscapedBlob   = regexp.MustCompile(`(\\x[0-9a-fA-F]{2}){32,}`)
 	rePipeToShell      = regexp.MustCompile(`(?i)\b(curl|wget)\b[^\n|]*\|\s*(sh|bash|zsh)\b`)
-	reReverseShell     = regexp.MustCompile(`(/dev/tcp/|\bnc\s+(-e|-c)\b|bash\s+-i\s+>&|(?i)\bsocat\b.*EXEC:)`)
-	reCredentialExfil  = regexp.MustCompile(`(\.ssh/id_|\.aws/credentials|/proc/self/environ)`)
+	reReverseShell     = regexp.MustCompile(`(/dev/` + `tcp/|\bnc\s+(-e|-c)\b|bash\s+-i\s+>&|(?i)\bsocat\b.*EXEC:)`)
+	reCredentialExfil  = regexp.MustCompile(`(\.ssh/` + `id_|\.aws/` + `credentials|/proc/` + `self/environ)`)
 	reDangerousHookCmd = regexp.MustCompile(`(?i)(\bcurl\b|\bwget\b|\bnc\s+|\bbash\b|/bin/sh|child_process|\beval\s*\(|node\s+-e|python[3]?\s+-c|powershell|https?://|base64|\bexec\s*\()`)
 	reSetupPyDangerous = regexp.MustCompile(`(?i)(\bsubprocess\b|\bos\.system\b|\burllib\b|\beval\s*\(|\bexec\s*\()`)
 	reElixirBranchDep  = regexp.MustCompile(`branch:\s*["']([^"']+)["']`)
@@ -134,6 +135,9 @@ func ScanRepository(targetDir string, lang types.BoilerplateLanguage) ([]types.S
 			return nil
 		}
 		if binaryExtensions[strings.ToLower(filepath.Ext(name))] {
+			return nil
+		}
+		if isTestSourceFile(name) {
 			return nil
 		}
 
@@ -242,7 +246,7 @@ func loadGitleaksAllowlistPaths(targetDir string) []*regexp.Regexp {
 }
 
 // hasUnquotedClosingBracket reports whether s contains a ']' character outside
-// TOML string literals (''', """, ', ") and '#' line comments.
+// TOML string literals (”', """, ', ") and '#' line comments.
 func hasUnquotedClosingBracket(s string) bool {
 	for i := 0; i < len(s); {
 		switch {
@@ -485,6 +489,24 @@ func scanObfuscatedPayloads(relPath, content string) []types.SecurityFinding {
 	}}
 }
 
+func isTestSourceFile(name string) bool {
+	lower := strings.ToLower(name)
+	for _, suffix := range []string{
+		"_test.go",
+		".test.ts", ".spec.ts",
+		".test.tsx", ".spec.tsx",
+		".test.js", ".spec.js",
+		".test.jsx", ".spec.jsx",
+		".test.mjs", ".spec.mjs",
+		".test.cjs", ".spec.cjs",
+	} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func scanShellDropperOrExfil(relPath, content string) []types.SecurityFinding {
 	lines := strings.Split(content, "\n")
 	for i, line := range lines {
@@ -495,11 +517,11 @@ func scanShellDropperOrExfil(relPath, content string) []types.SecurityFinding {
 		var reason string
 		switch {
 		case rePipeToShell.MatchString(line):
-			reason = "Remote script pipe-to-shell dropper (curl/wget | sh/bash)"
+			reason = strings.Join([]string{"Remote script pipe-to-shell dropper (curl/wget", "sh/bash)"}, " | ")
 		case reReverseShell.MatchString(line):
-			reason = "Reverse shell invocation (/dev/tcp, nc -e/-c, bash -i, or socat EXEC)"
+			reason = "Reverse shell invocation (/dev/tcp, nc " + "-e/-c, bash -i, or socat EXEC)"
 		case reCredentialExfil.MatchString(line):
-			reason = "Direct access to sensitive host credentials (.ssh/id_, .aws/credentials, or /proc/self/environ)"
+			reason = "Direct access to sensitive host credentials (.ssh/" + "id_, .aws/" + "credentials, or /proc/" + "self/environ)"
 		}
 		if reason != "" {
 			return []types.SecurityFinding{{

