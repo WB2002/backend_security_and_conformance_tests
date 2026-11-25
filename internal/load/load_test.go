@@ -113,7 +113,7 @@ func TestRunK6LoadTest_DockerReadablePermissions(t *testing.T) {
 }
 
 func TestGenerateK6Script_AuthenticatedMultiEndpointMix(t *testing.T) {
-	m, _ := manifest.ParseAndValidateManifest([]byte(`{
+	m, err := manifest.ParseAndValidateManifest([]byte(`{
 		"name": "auth-api",
 		"language": "typescript",
 		"capabilities": {
@@ -125,6 +125,9 @@ func TestGenerateK6Script_AuthenticatedMultiEndpointMix(t *testing.T) {
 			}
 		}
 	}`))
+	if err != nil {
+		t.Fatalf("ParseAndValidateManifest failed: %v", err)
+	}
 	script := load.GenerateK6Script(m, "http://127.0.0.1:3000", load.ProfileBaseline)
 	for _, want := range []string{"export function setup()", "/auth/register", "/auth/login", "/auth/me", "Authorization"} {
 		if !strings.Contains(script, want) {

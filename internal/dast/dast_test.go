@@ -122,8 +122,10 @@ func TestAuthenticatedAndFailClosedDAST(t *testing.T) {
 		dockerCmds = append(dockerCmds, cmd)
 		// Check ZAP workdir permissions while it exists during execution
 		if len(dockerCmds) == 2 {
+			foundMount := false
 			for i, a := range cmd.Args {
 				if a == "-v" && i+1 < len(cmd.Args) && strings.HasSuffix(cmd.Args[i+1], ":/zap/wrk:rw") {
+					foundMount = true
 					hostDir := strings.TrimSuffix(cmd.Args[i+1], ":/zap/wrk:rw")
 					dirInfo, statErr := os.Stat(hostDir)
 					if statErr != nil {
@@ -140,6 +142,9 @@ func TestAuthenticatedAndFailClosedDAST(t *testing.T) {
 						t.Fatalf("expected ZAP parentDir to be 0700, got %o", parentInfo.Mode().Perm())
 					}
 				}
+			}
+			if !foundMount {
+				t.Fatalf("expected :/zap/wrk:rw mount in ZAP docker args: %v", cmd.Args)
 			}
 		}
 		return runner.ToolExecutionResult{ExitCode: 0, OK: true}, nil
