@@ -76,6 +76,12 @@ type WebSocketCapability struct {
 	Path    string `json:"path"`
 }
 
+type RateLimitCapability struct {
+	Enabled         bool   `json:"enabled"`
+	Path            string `json:"path,omitempty"`
+	LoginBurstCount int    `json:"loginBurstCount,omitempty"`
+}
+
 type ManifestCapabilities struct {
 	Health     EndpointSpec         `json:"health"`
 	Auth       *AuthCapabilities    `json:"auth,omitempty"`
@@ -83,6 +89,7 @@ type ManifestCapabilities struct {
 	RBAC       *RBACCapabilities    `json:"rbac,omitempty"`
 	SSRFTest   *SSRFTestCapability  `json:"ssrfTest,omitempty"`
 	WebSockets *WebSocketCapability `json:"websockets,omitempty"`
+	RateLimit  *RateLimitCapability `json:"rateLimit,omitempty"`
 }
 
 type BoilerplateManifest struct {

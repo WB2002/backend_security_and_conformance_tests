@@ -79,6 +79,10 @@ func ParseAndValidateManifest(data []byte) (types.BoilerplateManifest, error) {
 		m.Capabilities.SSRFTest.Method = "POST"
 	}
 
+	if m.Capabilities.RateLimit != nil && m.Capabilities.RateLimit.LoginBurstCount <= 0 {
+		m.Capabilities.RateLimit.LoginBurstCount = 25
+	}
+
 	return m, nil
 }
 

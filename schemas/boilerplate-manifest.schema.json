@@ -26,7 +26,15 @@
         "crud": { "type": "object" },
         "rbac": { "type": "object" },
         "ssrfTest": { "type": "object" },
-        "websockets": { "type": "object" }
+        "websockets": { "type": "object" },
+        "rateLimit": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "path": { "type": "string" },
+            "loginBurstCount": { "type": "integer", "minimum": 1, "default": 25 }
+          }
+        }
       }
     }
   }
