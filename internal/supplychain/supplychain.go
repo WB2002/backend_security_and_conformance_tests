@@ -137,9 +137,6 @@ func ScanRepository(targetDir string, lang types.BoilerplateLanguage) ([]types.S
 		if binaryExtensions[strings.ToLower(filepath.Ext(name))] {
 			return nil
 		}
-		if isTestSourceFile(name) {
-			return nil
-		}
 
 		rel, relErr := filepath.Rel(targetDir, path)
 		if relErr != nil {
@@ -164,11 +161,13 @@ func ScanRepository(targetDir string, lang types.BoilerplateLanguage) ([]types.S
 		// Check 1: Trojan Source bidi overrides & Variation Selector steganography.
 		findings = append(findings, scanTrojanSourceUnicode(relSlash, content)...)
 
-		// Check 2: Obfuscated Base64 / hex-escaped execution droppers.
-		findings = append(findings, scanObfuscatedPayloads(relSlash, content)...)
+		if !isTestSourceFile(name) {
+			// Check 2: Obfuscated Base64 / hex-escaped execution droppers.
+			findings = append(findings, scanObfuscatedPayloads(relSlash, content)...)
 
-		// Check 3: Pipe-to-shell, reverse shells, and credential exfil reads.
-		findings = append(findings, scanShellDropperOrExfil(relSlash, content)...)
+			// Check 3: Pipe-to-shell, reverse shells, and credential exfil reads.
+			findings = append(findings, scanShellDropperOrExfil(relSlash, content)...)
+		}
 
 		return nil
 	})
@@ -246,7 +245,7 @@ func loadGitleaksAllowlistPaths(targetDir string) []*regexp.Regexp {
 }
 
 // hasUnquotedClosingBracket reports whether s contains a ']' character outside
-// TOML string literals (”', """, ', ") and '#' line comments.
+// TOML string literals (''', """, ', ") and '#' line comments.
 func hasUnquotedClosingBracket(s string) bool {
 	for i := 0; i < len(s); {
 		switch {
