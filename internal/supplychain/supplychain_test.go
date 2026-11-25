@@ -281,4 +281,83 @@ paths = [
 			t.Fatalf("expected exactly 1 malware-trojan-source-unicode finding on pkg/auth_test.go, got %+v", findings)
 		}
 	})
+
+	t.Run("pyproject.toml http:// check skips # comment lines but flags active URLs", func(t *testing.T) {
+		repo := t.TempDir()
+		_ = os.WriteFile(filepath.Join(repo, "pyproject.toml"), []byte("[project]\nname = \"app\"\n# docs: http://example.com/guide\ndependencies = [\"fastapi>=0.110\"]\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(repo, "uv.lock"), []byte("version = 1\n"), 0o644)
+
+		findings, err := supplychain.ScanRepository(repo, types.LangPython)
+		if err != nil || len(findings) != 0 {
+			t.Fatalf("expected 0 findings when http:// only appears in # comment, got %+v (err=%v)", findings, err)
+		}
+
+		_ = os.WriteFile(filepath.Join(repo, "pyproject.toml"), []byte("[project]\nname = \"app\"\n# docs: http://example.com/guide\ndependencies = [\"fastapi>=0.110\"]\n\n[[tool.uv.index]]\nurl = \"http://insecure.example/simple\"\n"), 0o644)
+		findings, err = supplychain.ScanRepository(repo, types.LangPython)
+		if err != nil || len(findings) != 1 || findings[0].ID != "supplychain-lockfile-integrity" || findings[0].FilePath != "pyproject.toml" || findings[0].Line != 7 {
+			t.Fatalf("expected 1 supplychain-lockfile-integrity finding on line 7 of pyproject.toml, got %+v (err=%v)", findings, err)
+		}
+	})
+
+	t.Run("scanGitHubWorkflows detects expression injection inside |+, >+, and run: | # comment blocks", func(t *testing.T) {
+		repo := t.TempDir()
+		wfDir := filepath.Join(repo, ".github", "workflows")
+		if err := os.MkdirAll(wfDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		wf := `on: issues
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: keep-chomping-literal
+        run: |+
+          echo "${{ github.event.issue.title }}"
+      - name: keep-chomping-folded
+        run: >+
+          echo "${{ github.event.issue.body }}"
+      - name: literal-with-comment
+        run: | # inline comment
+          echo "${{ github.event.comment.body }}"
+      - name: comment-only-not-block
+        run: # comment only
+        env:
+          TITLE: ${{ github.event.issue.title }}
+`
+		if err := os.WriteFile(filepath.Join(wfDir, "triage.yml"), []byte(wf), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		findings, err := supplychain.ScanRepository(repo, types.LangGo)
+		if err != nil {
+			t.Fatalf("ScanRepository error: %v", err)
+		}
+		var ghaCount int
+		for _, f := range findings {
+			if f.ID == "supplychain-github-actions-injection" {
+				ghaCount++
+			}
+		}
+		if ghaCount != 3 {
+			t.Fatalf("expected exactly 3 supplychain-github-actions-injection findings, got %d: %+v", ghaCount, findings)
+		}
+	})
+
+	t.Run("Multiline triple-quoted TOML string in .gitleaks.toml paths with bracket and inline comment", func(t *testing.T) {
+		repo := t.TempDir()
+		_ = os.WriteFile(filepath.Join(repo, ".gitleaks.toml"), []byte(`[allowlist]
+paths = [
+  '''src/
+  [a-z]+/fixtures/.*''', # inline comment
+  '''\.env\.example$''',
+]
+`), 0o644)
+		longBlob := strings.Repeat("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A", 10)
+		_ = os.WriteFile(filepath.Join(repo, ".env.example"), []byte("JWT_KEY="+longBlob+"\n"), 0o644)
+
+		findings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
+		if err != nil || len(findings) != 0 {
+			t.Fatalf("expected 0 findings with multiline triple-quoted TOML path and inline comment, got %+v (err=%v)", findings, err)
+		}
+	})
 }

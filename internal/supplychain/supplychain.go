@@ -233,7 +233,7 @@ func loadGitleaksAllowlistPaths(targetDir string) []*regexp.Regexp {
 		} else {
 			pathsBuf.WriteString("\n")
 			pathsBuf.WriteString(line)
-			if hasUnquotedClosingBracket(line) {
+			if hasUnquotedClosingBracket(pathsBuf.String()) {
 				patterns = append(patterns, extractTOMLRegexList(pathsBuf.String())...)
 				pathsBuf.Reset()
 				inPathsArray = false
@@ -298,7 +298,11 @@ func hasUnquotedClosingBracket(s string) bool {
 				return false
 			}
 		case s[i] == '#':
-			return false
+			nl := strings.IndexByte(s[i:], '\n')
+			if nl < 0 {
+				return false
+			}
+			i += nl + 1
 		case s[i] == ']':
 			return true
 		default:
@@ -751,17 +755,25 @@ func scanLockfileAndDependencyIntegrity(targetDir string, _ types.BoilerplateLan
 				})
 			}
 		}
-		if strings.Contains(strings.ToLower(content), "http://") {
-			findings = append(findings, types.SecurityFinding{
-				ID:          "supplychain-lockfile-integrity",
-				Category:    types.CategorySupplyChain,
-				Tool:        "supplychain",
-				Severity:    types.SeverityHigh,
-				Title:       "Cleartext HTTP URL in pyproject.toml",
-				Description: "pyproject.toml contains an insecure cleartext http:// URL.",
-				FilePath:    "pyproject.toml",
-				CWE:         "CWE-494",
-			})
+		lines := strings.Split(content, "\n")
+		for i, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(strings.ToLower(line), "http://") {
+				findings = append(findings, types.SecurityFinding{
+					ID:          "supplychain-lockfile-integrity",
+					Category:    types.CategorySupplyChain,
+					Tool:        "supplychain",
+					Severity:    types.SeverityHigh,
+					Title:       "Cleartext HTTP URL in pyproject.toml",
+					Description: fmt.Sprintf("Line %d of pyproject.toml contains an insecure cleartext http:// URL.", i+1),
+					FilePath:    "pyproject.toml",
+					Line:        i + 1,
+					CWE:         "CWE-494",
+				})
+			}
 		}
 	}
 
@@ -975,7 +987,7 @@ func scanGitHubWorkflows(targetDir string) []types.SecurityFinding {
 			cleaned = strings.TrimSpace(cleaned)
 			if strings.HasPrefix(cleaned, "run:") {
 				rhs := strings.TrimSpace(strings.TrimPrefix(cleaned, "run:"))
-				if rhs == "|" || rhs == ">" || rhs == "|-" || rhs == ">-" || rhs == "" {
+				if isYAMLBlockScalarHeader(rhs) {
 					inRunBlock = true
 					runIndent = indent
 				} else if reGHAUntrustedExpr.MatchString(rhs) {
@@ -1008,4 +1020,20 @@ func scanGitHubWorkflows(targetDir string) []types.SecurityFinding {
 	}
 
 	return findings
+}
+
+func isYAMLBlockScalarHeader(rhs string) bool {
+	s := strings.TrimSpace(rhs)
+	if s == "" {
+		return true
+	}
+	if idx := strings.IndexByte(s, '#'); idx > 0 && (s[idx-1] == ' ' || s[idx-1] == '\t') {
+		s = strings.TrimSpace(s[:idx])
+	}
+	switch s {
+	case "|", ">", "|-", ">-", "|+", ">+":
+		return true
+	default:
+		return false
+	}
 }

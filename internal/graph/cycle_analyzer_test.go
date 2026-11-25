@@ -1,6 +1,7 @@
 package graph_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/graph"
@@ -197,6 +198,36 @@ func TestParseCycloneDXSBOMGraphUpgradesOSVMalwareToCriticalMalwareCategory(t *t
 	}
 	if findings[0].Severity != types.SeverityCritical {
 		t.Fatalf("expected Severity %q, got %q", types.SeverityCritical, findings[0].Severity)
+	}
+
+	// 2-node SBOM cycle containing a MAL-* package must be flagged as a Critical toxic cycle.
+	cdxCycle := []byte(`{
+  "components": [
+    { "bom-ref": "pkg:npm/evil-pkg@1.0.0", "name": "evil-pkg", "version": "1.0.0" },
+    { "bom-ref": "pkg:npm/helper-pkg@1.0.0", "name": "helper-pkg", "version": "1.0.0" }
+  ],
+  "dependencies": [
+    { "ref": "pkg:npm/evil-pkg@1.0.0", "dependsOn": ["pkg:npm/helper-pkg@1.0.0"] },
+    { "ref": "pkg:npm/helper-pkg@1.0.0", "dependsOn": ["pkg:npm/evil-pkg@1.0.0"] }
+  ]
+}`)
+	sbomCycleG, cycleFindings, err := graph.ParseCycloneDXSBOMGraph(cdxCycle, osv)
+	if err != nil {
+		t.Fatalf("ParseCycloneDXSBOMGraph cycle failed: %v", err)
+	}
+	if len(cycleFindings) != 1 {
+		t.Fatalf("expected 1 malware finding on cycle graph, got %d: %+v", len(cycleFindings), cycleFindings)
+	}
+	_, analyzedSBOM := graph.AnalyzeDependencyGraphs(types.DependencyGraph{}, sbomCycleG, cycleFindings)
+	if len(analyzedSBOM.Cycles) != 1 {
+		t.Fatalf("expected 1 cycle in 2-node MAL-* SBOM graph, got %d: %+v", len(analyzedSBOM.Cycles), analyzedSBOM.Cycles)
+	}
+	cyc := analyzedSBOM.Cycles[0]
+	if !cyc.IsToxic || cyc.Severity != types.SeverityCritical {
+		t.Fatalf("expected Critical toxic cycle for MAL-* package, got %+v", cyc)
+	}
+	if !slices.Contains(cyc.RelatedFindings, cycleFindings[0].ID) {
+		t.Fatalf("expected RelatedFindings to contain %q, got %+v", cycleFindings[0].ID, cyc.RelatedFindings)
 	}
 }
 
