@@ -160,4 +160,59 @@ end`), 0o644)
 			}
 		}
 	})
+
+	t.Run("Multiline .gitleaks.toml paths array with regex character classes does not prematurely terminate allowlist", func(t *testing.T) {
+		repo := t.TempDir()
+		_ = os.WriteFile(filepath.Join(repo, ".gitleaks.toml"), []byte(`[allowlist]
+paths = [
+  '''src/[a-z]+/fixtures/.*''',
+  '''\.env\.example$''',
+]
+`), 0o644)
+		_ = os.MkdirAll(filepath.Join(repo, "src", "auth", "fixtures"), 0o755)
+		longBlob := strings.Repeat("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A", 10)
+		_ = os.WriteFile(filepath.Join(repo, "src", "auth", "fixtures", "cert.pem"), []byte(longBlob+"\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(repo, ".env.example"), []byte("JWT_KEY="+longBlob+"\n"), 0o644)
+
+		findings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
+		if err != nil || len(findings) != 0 {
+			t.Fatalf("expected 0 findings when multiline .gitleaks.toml has regex character classes, got %+v (err=%v)", findings, err)
+		}
+	})
+
+	t.Run("package-lock.json scan deterministically reports missing integrity and still detects http:// URLs on remaining packages", func(t *testing.T) {
+		repo := t.TempDir()
+		_ = os.WriteFile(filepath.Join(repo, "package.json"), []byte(`{"name":"app","dependencies":{"a":"1.0.0","b":"1.0.0","z":"1.0.0"}}`), 0o644)
+		_ = os.WriteFile(filepath.Join(repo, "package-lock.json"), []byte(`{
+			"lockfileVersion": 3,
+			"packages": {
+				"": { "name": "app" },
+				"node_modules/a": { "version": "1.0.0", "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz" },
+				"node_modules/b": { "version": "1.0.0", "resolved": "https://registry.npmjs.org/b/-/b-1.0.0.tgz" },
+				"node_modules/z": { "version": "1.0.0", "resolved": "http://evil.example/z-1.0.0.tgz", "integrity": "sha512-abc" }
+			}
+		}`), 0o644)
+
+		for i := 0; i < 20; i++ {
+			findings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
+			if err != nil {
+				t.Fatalf("ScanRepository error: %v", err)
+			}
+			var foundHTTP, foundMissingA bool
+			for _, f := range findings {
+				if strings.Contains(f.Title, "Cleartext HTTP resolved URL") && strings.Contains(f.Title, "node_modules/z") {
+					foundHTTP = true
+				}
+				if strings.Contains(f.Title, "Missing integrity hash") {
+					if !strings.Contains(f.Title, "node_modules/a") {
+						t.Fatalf("run %d: expected deterministic missing integrity report for node_modules/a, got %q", i, f.Title)
+					}
+					foundMissingA = true
+				}
+			}
+			if !foundHTTP || !foundMissingA {
+				t.Fatalf("run %d: expected both cleartext HTTP (node_modules/z) and missing integrity (node_modules/a) findings, got %+v", i, findings)
+			}
+		}
+	})
 }

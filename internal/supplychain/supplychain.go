@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
@@ -218,7 +219,7 @@ func loadGitleaksAllowlistPaths(targetDir string) []*regexp.Regexp {
 				if strings.HasPrefix(rhs, "[") {
 					pathsBuf.Reset()
 					pathsBuf.WriteString(rhs)
-					if strings.Contains(rhs, "]") {
+					if hasUnquotedClosingBracket(rhs) {
 						patterns = append(patterns, extractTOMLRegexList(pathsBuf.String())...)
 						pathsBuf.Reset()
 					} else {
@@ -229,7 +230,7 @@ func loadGitleaksAllowlistPaths(targetDir string) []*regexp.Regexp {
 		} else {
 			pathsBuf.WriteString("\n")
 			pathsBuf.WriteString(line)
-			if strings.Contains(line, "]") {
+			if hasUnquotedClosingBracket(line) {
 				patterns = append(patterns, extractTOMLRegexList(pathsBuf.String())...)
 				pathsBuf.Reset()
 				inPathsArray = false
@@ -238,6 +239,70 @@ func loadGitleaksAllowlistPaths(targetDir string) []*regexp.Regexp {
 	}
 
 	return patterns
+}
+
+// hasUnquotedClosingBracket reports whether s contains a ']' character outside
+// TOML string literals (''', """, ', ") and '#' line comments.
+func hasUnquotedClosingBracket(s string) bool {
+	for i := 0; i < len(s); {
+		switch {
+		case strings.HasPrefix(s[i:], "'''"):
+			end := strings.Index(s[i+3:], "'''")
+			if end < 0 {
+				return false
+			}
+			i += 3 + end + 3
+		case strings.HasPrefix(s[i:], `"""`):
+			i += 3
+			closed := false
+			for i < len(s) {
+				if s[i] == '\\' && i+1 < len(s) {
+					i += 2
+					continue
+				}
+				if strings.HasPrefix(s[i:], `"""`) {
+					i += 3
+					closed = true
+					break
+				}
+				i++
+			}
+			if !closed {
+				return false
+			}
+		case s[i] == '\'':
+			end := strings.IndexByte(s[i+1:], '\'')
+			if end < 0 {
+				return false
+			}
+			i += 1 + end + 1
+		case s[i] == '"':
+			i++
+			closed := false
+			for i < len(s) {
+				if s[i] == '\\' && i+1 < len(s) {
+					i += 2
+					continue
+				}
+				if s[i] == '"' {
+					i++
+					closed = true
+					break
+				}
+				i++
+			}
+			if !closed {
+				return false
+			}
+		case s[i] == '#':
+			return false
+		case s[i] == ']':
+			return true
+		default:
+			i++
+		}
+	}
+	return false
 }
 
 func extractTOMLRegexList(raw string) []*regexp.Regexp {
@@ -589,7 +654,15 @@ func scanLockfileAndDependencyIntegrity(targetDir string, _ types.BoilerplateLan
 	if data, err := os.ReadFile(filepath.Join(targetDir, "package-lock.json")); err == nil {
 		var lock packageLockIntegrityDoc
 		if json.Unmarshal(data, &lock) == nil {
-			for pkgKey, entry := range lock.Packages {
+			pkgKeys := make([]string, 0, len(lock.Packages))
+			for k := range lock.Packages {
+				pkgKeys = append(pkgKeys, k)
+			}
+			sort.Strings(pkgKeys)
+
+			reportedMissingIntegrity := false
+			for _, pkgKey := range pkgKeys {
+				entry := lock.Packages[pkgKey]
 				if pkgKey == "" || entry.Link || strings.TrimSpace(entry.Resolved) == "" {
 					continue
 				}
@@ -605,7 +678,8 @@ func scanLockfileAndDependencyIntegrity(targetDir string, _ types.BoilerplateLan
 						CWE:         "CWE-494",
 					})
 				}
-				if strings.TrimSpace(entry.Integrity) == "" {
+				if !reportedMissingIntegrity && strings.TrimSpace(entry.Integrity) == "" {
+					reportedMissingIntegrity = true
 					findings = append(findings, types.SecurityFinding{
 						ID:          "supplychain-lockfile-integrity",
 						Category:    types.CategorySupplyChain,
@@ -616,7 +690,6 @@ func scanLockfileAndDependencyIntegrity(targetDir string, _ types.BoilerplateLan
 						FilePath:    "package-lock.json",
 						CWE:         "CWE-353",
 					})
-					break
 				}
 			}
 		}
