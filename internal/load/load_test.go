@@ -132,3 +132,45 @@ func TestGenerateK6Script_AuthenticatedMultiEndpointMix(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateK6Script_SetupThrowsOnTokenFailure(t *testing.T) {
+	mAuth, err := manifest.ParseAndValidateManifest([]byte(`{
+		"name": "auth-fail-closed-api",
+		"language": "go",
+		"capabilities": {
+			"health": { "path": "/health" },
+			"auth": {
+				"register": { "path": "/auth/register" },
+				"login": { "path": "/auth/login", "tokenPath": "data.accessToken" },
+				"me": { "path": "/auth/me" }
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authScript := load.GenerateK6Script(mAuth, "http://127.0.0.1:3000", load.ProfileBaseline)
+	for _, want := range []string{
+		`if (loginRes.status < 200 || loginRes.status >= 300 || !token)`,
+		`throw new Error("k6 setup failed: unable to acquire bearer token from `,
+	} {
+		if !strings.Contains(authScript, want) {
+			t.Fatalf("expected authenticated k6 script setup() to contain %q so auth failures abort run, got:\n%s", want, authScript)
+		}
+	}
+
+	mHealth, err := manifest.ParseAndValidateManifest([]byte(`{
+		"name": "health-only-api",
+		"language": "go",
+		"capabilities": {
+			"health": { "path": "/health" }
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthScript := load.GenerateK6Script(mHealth, "http://127.0.0.1:3000", load.ProfileBaseline)
+	if strings.Contains(healthScript, "k6 setup failed") {
+		t.Fatalf("did not expect health-only k6 script to contain auth setup error throw, got:\n%s", healthScript)
+	}
+}

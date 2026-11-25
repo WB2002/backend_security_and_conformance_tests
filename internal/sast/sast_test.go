@@ -177,4 +177,55 @@ func TestGitleaksGitHistoryAndTrivyImageScan(t *testing.T) {
 	}
 }
 
+func TestRunTrivyImageScan_ParsesSecrets(t *testing.T) {
+	trivySecretJSON := `{
+		"Results": [
+			{
+				"Target": "app/.env",
+				"Secrets": [
+					{
+						"RuleID": "aws-access-key-id",
+						"Category": "AWS",
+						"Severity": "CRITICAL",
+						"Title": "AWS Access Key ID",
+						"StartLine": 7,
+						"Match": "AWS_ACCESS_KEY_ID=AKIA****************"
+					}
+				]
+			}
+		]
+	}`
 
+	findings, err := sast.RunTrivyImageScan(context.Background(), "acme/api:1.0.0", runner.ModeLocal, func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+		return runner.ToolExecutionResult{
+			ExitCode: 0,
+			OK:       true,
+			Stdout:   trivySecretJSON,
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("RunTrivyImageScan returned unexpected error: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 secret finding from Trivy image scan, got %d (%+v)", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Category != types.CategorySecret {
+		t.Fatalf("expected CategorySecret, got %q", f.Category)
+	}
+	if f.Tool != "trivy" {
+		t.Fatalf("expected Tool=trivy, got %q", f.Tool)
+	}
+	if f.Severity != types.SeverityCritical {
+		t.Fatalf("expected SeverityCritical, got %q", f.Severity)
+	}
+	if f.FilePath != "app/.env" || f.Line != 7 {
+		t.Fatalf("expected FilePath=app/.env Line=7, got %q:%d", f.FilePath, f.Line)
+	}
+	if f.Title != "AWS Access Key ID" || f.ID != "trivy-secret-aws-access-key-id-1" {
+		t.Fatalf("expected Title and ID containing RuleID, got Title=%q ID=%q", f.Title, f.ID)
+	}
+	if f.CWE != "CWE-798" {
+		t.Fatalf("expected CWE-798 for secret finding, got %q", f.CWE)
+	}
+}

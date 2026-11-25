@@ -48,6 +48,28 @@ func detectRepoLanguage(targetDir string) types.BoilerplateLanguage {
 	return types.LangTypeScript
 }
 
+func parseStages(raw string) []string {
+	stages := strings.Split(raw, ",")
+	for i := range stages {
+		stages[i] = strings.TrimSpace(strings.ToLower(stages[i]))
+	}
+	return stages
+}
+
+func stageEnabled(stages []string, target string) bool {
+	return slices.Contains(stages, target) || slices.Contains(stages, "all")
+}
+
+func buildDASTOptions(baseURL string, m types.BoilerplateManifest, bearerToken string, stages []string, execMode runner.ExecutionMode) dast.DASTOptions {
+	return dast.DASTOptions{
+		BaseURL:        baseURL,
+		OpenAPIURL:     m.OpenAPIURL,
+		BearerToken:    bearerToken,
+		RequireOpenAPI: stageEnabled(stages, "dast"),
+		Mode:           execMode,
+	}
+}
+
 func main() {
 	cfg := config.LoadConfig(os.Getenv)
 
@@ -80,12 +102,9 @@ func main() {
 		targetDir = absTarget
 	}
 
-	stages := strings.Split(*stagesFlag, ",")
-	for i := range stages {
-		stages[i] = strings.TrimSpace(strings.ToLower(stages[i]))
-	}
+	stages := parseStages(*stagesFlag)
 	hasStage := func(s string) bool {
-		return slices.Contains(stages, s) || slices.Contains(stages, "all")
+		return stageEnabled(stages, s)
 	}
 
 	var m types.BoilerplateManifest
@@ -222,13 +241,7 @@ func main() {
 				bearerToken = tok
 			}
 		}
-		dFindings, err := dast.RunDASTSuiteWithOptions(ctx, dast.DASTOptions{
-			BaseURL:        *urlFlag,
-			OpenAPIURL:     m.OpenAPIURL,
-			BearerToken:    bearerToken,
-			RequireOpenAPI: slices.Contains(stages, "dast"),
-			Mode:           execMode,
-		}, nil)
+		dFindings, err := dast.RunDASTSuiteWithOptions(ctx, buildDASTOptions(*urlFlag, m, bearerToken, stages, execMode), nil)
 		if err != nil {
 			stageErrors = append(stageErrors, fmt.Sprintf("DAST stage execution error: %v", err))
 		}

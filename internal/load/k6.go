@@ -158,6 +158,9 @@ export function setup() {
   } catch (_) {
     token = "";
   }
+  if (loginRes.status < 200 || loginRes.status >= 300 || !token) {
+    throw new Error("k6 setup failed: unable to acquire bearer token from " + BASE_URL + %q + " (status " + loginRes.status + ")");
+  }
   return { token: token };
 }
 
@@ -176,7 +179,7 @@ export default function (data) {
   }
   sleep(0.1);
 }
-`, stagesJS, thresholdsJS, targetBase, registerBlock, loginEmailField, loginPasswordField, loginPath, tokenPath, healthPath, mePath)
+`, stagesJS, thresholdsJS, targetBase, registerBlock, loginEmailField, loginPasswordField, loginPath, tokenPath, loginPath, healthPath, mePath)
 }
 
 type k6SummaryDoc struct {

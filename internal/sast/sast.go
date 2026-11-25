@@ -171,6 +171,14 @@ type trivyResponse struct {
 			Title            string `json:"Title"`
 			Description      string `json:"Description"`
 		} `json:"Vulnerabilities"`
+		Secrets []struct {
+			RuleID    string `json:"RuleID"`
+			Category  string `json:"Category"`
+			Severity  string `json:"Severity"`
+			Title     string `json:"Title"`
+			Match     string `json:"Match"`
+			StartLine int    `json:"StartLine"`
+		} `json:"Secrets"`
 	} `json:"Results"`
 }
 
@@ -208,6 +216,31 @@ func ParseTrivyFSOutput(rawJSON []byte, targetDir string) ([]types.SecurityFindi
 				FilePath:    relTarget,
 				CVE:         vuln.VulnerabilityID,
 				PackageName: vuln.PkgName,
+			})
+		}
+		for i, sec := range res.Secrets {
+			ruleID := strings.TrimSpace(sec.RuleID)
+			if ruleID == "" {
+				ruleID = "secret"
+			}
+			title := strings.TrimSpace(sec.Title)
+			if title == "" {
+				title = fmt.Sprintf("Hardcoded secret (%s)", ruleID)
+			}
+			desc := fmt.Sprintf("Secret detected (%s)", ruleID)
+			if cat := strings.TrimSpace(sec.Category); cat != "" {
+				desc = fmt.Sprintf("%s (%s)", cat, ruleID)
+			}
+			findings = append(findings, types.SecurityFinding{
+				ID:          fmt.Sprintf("trivy-secret-%s-%d", ruleID, i+1),
+				Category:    types.CategorySecret,
+				Tool:        "trivy",
+				Severity:    mapSeverity(sec.Severity),
+				Title:       title,
+				Description: desc,
+				FilePath:    relTarget,
+				Line:        sec.StartLine,
+				CWE:         "CWE-798",
 			})
 		}
 	}
