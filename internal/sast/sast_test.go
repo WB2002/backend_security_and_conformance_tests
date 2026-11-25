@@ -135,6 +135,46 @@ func TestRunSASTSuite_IncludesExclusionsAndGitleaksConfig(t *testing.T) {
 	if !slices.Contains(calls[2].Args, "node_modules,dist,.git,.conformance-runner,.worktrees,.tsd-emit,coverage,test,tests") {
 		t.Fatalf("expected trivy --skip-dirs to exclude .conformance-runner/.worktrees/.tsd-emit/coverage, got %v", calls[2].Args)
 	}
+	if !slices.Contains(calls[1].Args, "--no-git") {
+		t.Fatalf("expected gitleaks to pass --no-git when .git directory is absent, got %v", calls[1].Args)
+	}
+}
+
+func TestGitleaksGitHistoryAndTrivyImageScan(t *testing.T) {
+	gitRepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(gitRepo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls []runner.ResolvedCommand
+	mockExec := func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+		calls = append(calls, cmd)
+		return runner.ToolExecutionResult{ExitCode: 0, OK: true, Mode: cmd.Mode}, nil
+	}
+
+	if _, err := sast.RunSASTSuite(context.Background(), gitRepo, runner.ModeLocal, mockExec); err != nil {
+		t.Fatalf("RunSASTSuite failed: %v", err)
+	}
+	if !slices.Contains(calls[0].Args, "--metrics=off") {
+		t.Fatalf("expected semgrep --metrics=off, got %v", calls[0].Args)
+	}
+	if slices.Contains(calls[1].Args, "--no-git") {
+		t.Fatalf("expected gitleaks to scan git history (no --no-git) when .git exists, got %v", calls[1].Args)
+	}
+
+	imgFindings, err := sast.RunTrivyImageScan(context.Background(), "acme/api:1.0.0", runner.ModeLocal, func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+		if !slices.Contains(cmd.Args, "image") || !slices.Contains(cmd.Args, "acme/api:1.0.0") {
+			t.Fatalf("unexpected trivy image args: %v", cmd.Args)
+		}
+		return runner.ToolExecutionResult{
+			ExitCode: 0,
+			OK:       true,
+			Stdout:   `{"Results":[{"Target":"acme/api:1.0.0 (alpine 3.20)","Vulnerabilities":[{"VulnerabilityID":"CVE-2026-0001","PkgName":"libcrypto3","Severity":"CRITICAL","Title":"OpenSSL RCE"}]}]}`,
+		}, nil
+	})
+	if err != nil || len(imgFindings) != 1 || imgFindings[0].CVE != "CVE-2026-0001" {
+		t.Fatalf("expected 1 critical image CVE finding, got %+v (err=%v)", imgFindings, err)
+	}
 }
 
 

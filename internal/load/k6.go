@@ -118,14 +118,11 @@ func ParseK6SummaryJSON(rawJSON []byte, profile LoadProfile) (types.LoadTestSumm
 }
 
 func RunK6LoadTest(ctx context.Context, m types.BoilerplateManifest, baseURL string, profile LoadProfile, mode runner.ExecutionMode, execFn runner.CommandExecutor) (*types.LoadTestSummary, error) {
-	tmpDir, err := os.MkdirTemp("", "k6-conformance-*")
+	parentDir, outDir, err := runner.CreateIsolatedWorkDir("k6-conformance-")
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmpDir)
-	if err := os.Chmod(tmpDir, 0o777); err != nil {
-		return nil, err
-	}
+	defer os.RemoveAll(parentDir)
 
 	targetBase := baseURL
 	effectiveMode := runner.ResolveEffectiveMode(mode, runner.ToolK6)
@@ -134,8 +131,8 @@ func RunK6LoadTest(ctx context.Context, m types.BoilerplateManifest, baseURL str
 	}
 
 	scriptContent := GenerateK6Script(m, targetBase, profile)
-	scriptPath := filepath.Join(tmpDir, "load.js")
-	summaryPath := filepath.Join(tmpDir, "summary.json")
+	scriptPath := filepath.Join(outDir, "load.js")
+	summaryPath := filepath.Join(outDir, "summary.json")
 	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o644); err != nil {
 		return nil, err
 	}
@@ -150,7 +147,7 @@ func RunK6LoadTest(ctx context.Context, m types.BoilerplateManifest, baseURL str
 	k6Res, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolK6,
 		Args:             []string{"run", "--summary-trend-stats", "avg,min,med,max,p(90),p(95),p(99)", "--summary-export", argSummary, argScript},
-		WorkDir:          tmpDir,
+		WorkDir:          outDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 99},
 	}, execFn)

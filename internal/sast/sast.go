@@ -226,7 +226,7 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 
 	semgrepRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolSemgrep,
-		Args:             []string{"scan", "--config", "auto", "--json", "--quiet", "--exclude", "node_modules", "--exclude", "dist", "--exclude", "test/security/semgrep-fixtures", "--exclude", ".conformance-runner", "--exclude", ".worktrees", "--exclude", ".tsd-emit", "--exclude", "coverage", scanPathFor(runner.ToolSemgrep)},
+		Args:             []string{"scan", "--config", "auto", "--metrics=off", "--json", "--quiet", "--exclude", "node_modules", "--exclude", "dist", "--exclude", "test/security/semgrep-fixtures", "--exclude", ".conformance-runner", "--exclude", ".worktrees", "--exclude", ".tsd-emit", "--exclude", "coverage", scanPathFor(runner.ToolSemgrep)},
 		TargetDir:        targetDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
@@ -242,7 +242,11 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 		all = append(all, f...)
 	}
 
-	gitleaksArgs := []string{"detect", "--source", scanPathFor(runner.ToolGitleaks), "--no-git", "--report-format", "json", "--report-path", "-"}
+	gitleaksArgs := []string{"detect", "--source", scanPathFor(runner.ToolGitleaks)}
+	if _, gitErr := os.Stat(filepath.Join(targetDir, ".git")); gitErr != nil {
+		gitleaksArgs = append(gitleaksArgs, "--no-git")
+	}
+	gitleaksArgs = append(gitleaksArgs, "--report-format", "json", "--report-path", "-")
 	if _, statErr := os.Stat(filepath.Join(targetDir, ".gitleaks.toml")); statErr == nil {
 		gitleaksArgs = append(gitleaksArgs, "--config", filepath.ToSlash(filepath.Join(scanPathFor(runner.ToolGitleaks), ".gitleaks.toml")))
 	}
@@ -284,4 +288,24 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 	}
 
 	return all, nil
+}
+
+func RunTrivyImageScan(ctx context.Context, imageRef string, mode runner.ExecutionMode, execFn runner.CommandExecutor) ([]types.SecurityFinding, error) {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return nil, nil
+	}
+	res, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
+		Tool:             runner.ToolTrivy,
+		Args:             []string{"image", "--scanners", "vuln,misconfig,secret", "--format", "json", "--quiet", imageRef},
+		Mode:             mode,
+		AllowedExitCodes: []int{0, 1},
+	}, execFn)
+	if err != nil {
+		return nil, fmt.Errorf("trivy image scan failed: %w", err)
+	}
+	if strings.TrimSpace(res.Stdout) == "" {
+		return nil, nil
+	}
+	return ParseTrivyFSOutput([]byte(res.Stdout), "")
 }

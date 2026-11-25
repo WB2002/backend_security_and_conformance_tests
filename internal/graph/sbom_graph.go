@@ -188,16 +188,13 @@ func ParseCycloneDXSBOMGraph(cdxJSON []byte, osvJSON []byte) (types.DependencyGr
 }
 
 func RunSBOMAndOSVScan(ctx context.Context, targetDir string, mode runner.ExecutionMode, execFn runner.CommandExecutor) (types.DependencyGraph, []types.SecurityFinding, error) {
-	tmpDir, err := os.MkdirTemp("", "sbom-conformance-*")
+	parentDir, outDir, err := runner.CreateIsolatedWorkDir("sbom-conformance-")
 	if err != nil {
 		return types.DependencyGraph{}, nil, err
 	}
-	defer os.RemoveAll(tmpDir)
-	if err := os.Chmod(tmpDir, 0o777); err != nil {
-		return types.DependencyGraph{}, nil, err
-	}
+	defer os.RemoveAll(parentDir)
 
-	sbomHostPath := filepath.Join(tmpDir, "bom.json")
+	sbomHostPath := filepath.Join(outDir, "bom.json")
 	sbomArgPath := sbomHostPath
 	scanTarget := targetDir
 	if runner.ResolveEffectiveMode(mode, runner.ToolCdxgen) == runner.ModeDocker {
@@ -209,7 +206,7 @@ func RunSBOMAndOSVScan(ctx context.Context, targetDir string, mode runner.Execut
 		Tool:             runner.ToolCdxgen,
 		Args:             []string{"-r", "-o", sbomArgPath, scanTarget},
 		TargetDir:        targetDir,
-		WorkDir:          tmpDir,
+		WorkDir:          outDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
 	}, execFn)

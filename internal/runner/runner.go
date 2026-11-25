@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -35,21 +36,48 @@ const (
 )
 
 type toolSpec struct {
-	LocalBinary   string
-	DockerImage   string
-	DockerCommand []string
+	LocalBinary      string
+	DockerImage      string
+	DockerCommand    []string
+	NeedsHostGateway bool
+	DefaultOffline   bool
 }
 
 var toolRegistry = map[ToolName]toolSpec{
-	ToolSemgrep:      {LocalBinary: "semgrep", DockerImage: "semgrep/semgrep:1.102.0", DockerCommand: []string{"semgrep"}},
-	ToolGitleaks:     {LocalBinary: "gitleaks", DockerImage: "zricethezav/gitleaks:v8.21.2"},
-	ToolTrivy:        {LocalBinary: "trivy", DockerImage: "aquasec/trivy:0.58.1"},
-	ToolCdxgen:       {LocalBinary: "cdxgen", DockerImage: "ghcr.io/cyclonedx/cdxgen-node20:v11.1.0"},
-	ToolOSVScanner:   {LocalBinary: "osv-scanner", DockerImage: "ghcr.io/google/osv-scanner:v1.9.1"},
-	ToolZAP:          {LocalBinary: "zap.sh", DockerImage: "ghcr.io/zaproxy/zaproxy:stable"},
-	ToolNuclei:       {LocalBinary: "nuclei", DockerImage: "projectdiscovery/nuclei:v3.3.7"},
-	ToolSchemathesis: {LocalBinary: "schemathesis", DockerImage: "schemathesis/schemathesis:stable"},
-	ToolK6:           {LocalBinary: "k6", DockerImage: "grafana/k6:0.55.0"},
+	ToolSemgrep:      {LocalBinary: "semgrep", DockerImage: "semgrep/semgrep:1.102.0@sha256:cef085245254d15c66d96be413c730f0b458823a1d0c39afbc12f705b664ce8f", DockerCommand: []string{"semgrep"}},
+	ToolGitleaks:     {LocalBinary: "gitleaks", DockerImage: "zricethezav/gitleaks:v8.21.2@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46", DefaultOffline: true},
+	ToolTrivy:        {LocalBinary: "trivy", DockerImage: "aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7"},
+	ToolCdxgen:       {LocalBinary: "cdxgen", DockerImage: "ghcr.io/cyclonedx/cdxgen-node20:v11.1.0@sha256:3dda0e862456a4b345c8c7e446b003ed3c0ebd1490b017382e0336b789fab878"},
+	ToolOSVScanner:   {LocalBinary: "osv-scanner", DockerImage: "ghcr.io/google/osv-scanner:v1.9.1@sha256:36dea1baa2b34df3ee911d712e6a774eff04cc8b25789e0e6837d40759afaeab"},
+	ToolZAP:          {LocalBinary: "zap.sh", DockerImage: "ghcr.io/zaproxy/zaproxy:2.16.0@sha256:391f66efa53b30de40d4a1c6e28146477263552fc828bc7613c9cd11a2949908", NeedsHostGateway: true},
+	ToolNuclei:       {LocalBinary: "nuclei", DockerImage: "projectdiscovery/nuclei:v3.3.8@sha256:3c37049ecfd2d3230add2e7308249f694bcb43cfe243d090d6046cd6c35ff855", NeedsHostGateway: true},
+	ToolSchemathesis: {LocalBinary: "schemathesis", DockerImage: "schemathesis/schemathesis:v3.39.8@sha256:d1d7f848c09f1cb270e421a0803a5722bcd898bbb2f365a8a5172e24b4dbbf5d", NeedsHostGateway: true},
+	ToolK6:           {LocalBinary: "k6", DockerImage: "grafana/k6:0.55.0@sha256:b24f418fc99a26dd57904c952c03bfaf79462be18508acc45aafa07ff68e7df2", NeedsHostGateway: true},
+}
+
+func PinnedToolImage(tool ToolName) string {
+	return toolRegistry[tool].DockerImage
+}
+
+func CreateIsolatedWorkDir(prefix string) (parentDir string, outDir string, err error) {
+	parentDir, err = os.MkdirTemp("", prefix)
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.Chmod(parentDir, 0o700); err != nil {
+		_ = os.RemoveAll(parentDir)
+		return "", "", err
+	}
+	outDir = filepath.Join(parentDir, "out")
+	if err := os.MkdirAll(outDir, 0o777); err != nil {
+		_ = os.RemoveAll(parentDir)
+		return "", "", err
+	}
+	if err := os.Chmod(outDir, 0o777); err != nil {
+		_ = os.RemoveAll(parentDir)
+		return "", "", err
+	}
+	return parentDir, outDir, nil
 }
 
 type ToolInvocationOptions struct {
@@ -60,6 +88,7 @@ type ToolInvocationOptions struct {
 	Mode             ExecutionMode
 	AllowedExitCodes []int
 	Env              []string
+	NetworkDisabled  bool
 }
 
 type ResolvedCommand struct {
@@ -131,7 +160,18 @@ func BuildToolInvocation(opts ToolInvocationOptions) (ResolvedCommand, error) {
 		}, nil
 	}
 
-	dockerArgs := []string{"run", "--rm", "--add-host=host.docker.internal:host-gateway"}
+	dockerArgs := []string{
+		"run", "--rm",
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges",
+		"--pids-limit=512",
+	}
+	if spec.NeedsHostGateway {
+		dockerArgs = append(dockerArgs, "--add-host=host.docker.internal:host-gateway")
+	}
+	if opts.NetworkDisabled || spec.DefaultOffline {
+		dockerArgs = append(dockerArgs, "--network=none")
+	}
 	if opts.TargetDir != "" {
 		absTarget := opts.TargetDir
 		if abs, err := filepath.Abs(opts.TargetDir); err == nil {

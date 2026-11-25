@@ -81,6 +81,13 @@ func TestRunK6LoadTest_DockerReadablePermissions(t *testing.T) {
 		if dirInfo.Mode().Perm()&0o007 != 0o007 {
 			t.Fatalf("expected WorkDir %s to be world-writable/readable/executable for docker k6 user, got %o", workDir, dirInfo.Mode().Perm())
 		}
+		parentInfo, err := os.Stat(filepath.Dir(workDir))
+		if err != nil {
+			return runner.ToolExecutionResult{}, err
+		}
+		if parentInfo.Mode().Perm() != 0o700 {
+			t.Fatalf("expected parent of WorkDir %s to be isolated 0700, got %o", workDir, parentInfo.Mode().Perm())
+		}
 		scriptInfo, err := os.Stat(scriptPath)
 		if err != nil {
 			return runner.ToolExecutionResult{}, err
