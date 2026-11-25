@@ -156,3 +156,112 @@ func TestLoadPolicyFileClampsMalwareAndLoadWaiverFile(t *testing.T) {
 	}
 }
 
+func TestApplySecurityWaivers_ValidationAndMatchingTable(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	validExp := "2026-12-31T00:00:00Z"
+
+	tests := []struct {
+		name               string
+		finding            types.SecurityFinding
+		waiver             types.SecurityWaiver
+		wantRetained       bool
+		wantViolationSubstr string
+	}{
+		{
+			name:    "malformed expiresAt",
+			finding: types.SecurityFinding{ID: "sast-1", Category: types.CategorySAST, Severity: types.SeverityHigh},
+			waiver: types.SecurityWaiver{
+				FindingID:     "sast-1",
+				Justification: "Verified safe",
+				ApprovedBy:    "sec-team",
+				ExpiresAt:     "not-a-date",
+			},
+			wantRetained:        true,
+			wantViolationSubstr: "must be valid RFC3339",
+		},
+		{
+			name:    "missing justification",
+			finding: types.SecurityFinding{ID: "sast-2", Category: types.CategorySAST, Severity: types.SeverityHigh},
+			waiver: types.SecurityWaiver{
+				FindingID:     "sast-2",
+				Justification: "   ",
+				ApprovedBy:    "sec-team",
+				ExpiresAt:     validExp,
+			},
+			wantRetained:        true,
+			wantViolationSubstr: "missing justification",
+		},
+		{
+			name:    "missing approvedBy",
+			finding: types.SecurityFinding{ID: "sast-3", Category: types.CategorySAST, Severity: types.SeverityHigh},
+			waiver: types.SecurityWaiver{
+				FindingID:     "sast-3",
+				Justification: "Verified safe",
+				ApprovedBy:    "",
+				ExpiresAt:     validExp,
+			},
+			wantRetained:        true,
+			wantViolationSubstr: "missing approvedBy",
+		},
+		{
+			name:    "RuleOrCVE matches CVE with surrounding whitespace",
+			finding: types.SecurityFinding{ID: "sca-1", CVE: "CVE-2026-4242", Category: types.CategorySCA, Severity: types.SeverityHigh},
+			waiver: types.SecurityWaiver{
+				RuleOrCVE:     "  CVE-2026-4242  ",
+				Justification: "Not reachable in runtime path",
+				ApprovedBy:    "sec-team",
+				ExpiresAt:     validExp,
+			},
+			wantRetained: false,
+		},
+		{
+			name:    "RuleOrCVE matches finding ID",
+			finding: types.SecurityFinding{ID: "semgrep-rule-99", Category: types.CategorySAST, Severity: types.SeverityMedium},
+			waiver: types.SecurityWaiver{
+				RuleOrCVE:     "semgrep-rule-99",
+				Justification: "False positive",
+				ApprovedBy:    "sec-team",
+				ExpiresAt:     validExp,
+			},
+			wantRetained: false,
+		},
+		{
+			name:    "FindingID matches with surrounding whitespace",
+			finding: types.SecurityFinding{ID: "sast-trim-1", Category: types.CategorySAST, Severity: types.SeverityHigh},
+			waiver: types.SecurityWaiver{
+				FindingID:     "  sast-trim-1  ",
+				Justification: "Verified safe",
+				ApprovedBy:    "sec-team",
+				ExpiresAt:     validExp,
+			},
+			wantRetained: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			card := types.ConformanceScorecard{
+				TargetName: "app",
+				Language:   types.LangGo,
+				Findings:   []types.SecurityFinding{tc.finding},
+			}
+			wf := types.WaiverFile{Waivers: []types.SecurityWaiver{tc.waiver}}
+
+			filtered, violations := policy.ApplySecurityWaivers(card, wf, now)
+			if tc.wantRetained && len(filtered.Findings) != 1 {
+				t.Fatalf("expected finding retained, got %+v", filtered.Findings)
+			}
+			if !tc.wantRetained && len(filtered.Findings) != 0 {
+				t.Fatalf("expected finding suppressed, got %+v", filtered.Findings)
+			}
+			if tc.wantViolationSubstr != "" {
+				if len(violations) == 0 || !strings.Contains(strings.Join(violations, "; "), tc.wantViolationSubstr) {
+					t.Fatalf("expected violation containing %q, got %v", tc.wantViolationSubstr, violations)
+				}
+			} else if len(violations) != 0 {
+				t.Fatalf("expected 0 violations, got %v", violations)
+			}
+		})
+	}
+}
+

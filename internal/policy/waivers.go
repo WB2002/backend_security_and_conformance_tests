@@ -37,10 +37,12 @@ func LoadWaiverFile(filePath string) (types.WaiverFile, error) {
 }
 
 func waiverMatchesFinding(w types.SecurityWaiver, f types.SecurityFinding) bool {
-	if w.FindingID != "" && w.FindingID == f.ID {
+	findingID := strings.TrimSpace(w.FindingID)
+	if findingID != "" && findingID == f.ID {
 		return true
 	}
-	if w.RuleOrCVE != "" && (w.RuleOrCVE == f.CVE || w.RuleOrCVE == f.ID) {
+	ruleOrCVE := strings.TrimSpace(w.RuleOrCVE)
+	if ruleOrCVE != "" && (ruleOrCVE == f.CVE || ruleOrCVE == f.ID) {
 		return true
 	}
 	return false
