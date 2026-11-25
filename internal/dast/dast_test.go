@@ -2,6 +2,10 @@ package dast_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -62,3 +66,119 @@ _ POST /api/v1/projects _
 	}
 }
 
+func TestAuthenticatedAndFailClosedDAST(t *testing.T) {
+	// 1. Missing OpenAPI with RequireOpenAPI: true MUST produce a high-severity dast-openapi-missing finding
+	srvNoSpec := httptest.NewServer(http.NotFoundHandler())
+	defer srvNoSpec.Close()
+
+	findings, err := dast.RunDASTSuiteWithOptions(context.Background(), dast.DASTOptions{
+		BaseURL:        srvNoSpec.URL,
+		RequireOpenAPI: true,
+		Mode:           runner.ModeLocal,
+	}, func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+		return runner.ToolExecutionResult{ExitCode: 0, OK: true}, nil
+	})
+	if err != nil || len(findings) != 1 || findings[0].ID != "dast-openapi-missing" || findings[0].Severity != types.SeverityHigh {
+		t.Fatalf("expected fail-closed dast-openapi-missing finding, got %+v (err=%v)", findings, err)
+	}
+
+	// 2. Auto-discovery of /openapi.json + Bearer token header propagation to Nuclei and Schemathesis
+	srvWithSpec := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/openapi.json" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"openapi":"3.0.0","info":{"title":"API","version":"1.0"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srvWithSpec.Close()
+
+	var cmds []runner.ResolvedCommand
+	_, err = dast.RunDASTSuiteWithOptions(context.Background(), dast.DASTOptions{
+		BaseURL:        srvWithSpec.URL,
+		BearerToken:    "jwt-secret-123",
+		RequireOpenAPI: true,
+		Mode:           runner.ModeLocal,
+	}, func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+		cmds = append(cmds, cmd)
+		return runner.ToolExecutionResult{ExitCode: 0, OK: true}, nil
+	})
+	if err != nil || len(cmds) != 3 {
+		t.Fatalf("expected all 3 DAST tools (nuclei, zap, schemathesis) to run via auto-discovered /api/openapi.json, got %d (err=%v)", len(cmds), err)
+	}
+	if !strings.Contains(strings.Join(cmds[0].Args, " "), "Authorization: Bearer jwt-secret-123") ||
+		!strings.Contains(strings.Join(cmds[2].Args, " "), "Authorization: Bearer jwt-secret-123") {
+		t.Fatalf("expected Bearer token injected into nuclei and schemathesis args: %v / %v", cmds[0].Args, cmds[2].Args)
+	}
+
+	// 3. Verify ZAP Docker invocation receives ZAP_AUTH_HEADER env vars and uses isolated 0700/0777 workdir
+	var dockerCmds []runner.ResolvedCommand
+	_, err = dast.RunDASTSuiteWithOptions(context.Background(), dast.DASTOptions{
+		BaseURL:        srvWithSpec.URL,
+		BearerToken:    "jwt-secret-123",
+		RequireOpenAPI: true,
+		Mode:           runner.ModeDocker,
+	}, func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+		dockerCmds = append(dockerCmds, cmd)
+		// Check ZAP workdir permissions while it exists during execution
+		if len(dockerCmds) == 2 {
+			for i, a := range cmd.Args {
+				if a == "-v" && i+1 < len(cmd.Args) && strings.HasSuffix(cmd.Args[i+1], ":/zap/wrk:rw") {
+					hostDir := strings.TrimSuffix(cmd.Args[i+1], ":/zap/wrk:rw")
+					dirInfo, statErr := os.Stat(hostDir)
+					if statErr != nil {
+						t.Fatalf("failed to stat ZAP outDir %s: %v", hostDir, statErr)
+					}
+					if dirInfo.Mode().Perm()&0o007 != 0o007 {
+						t.Fatalf("expected ZAP outDir %s to be 0777, got %o", hostDir, dirInfo.Mode().Perm())
+					}
+					parentInfo, statErr := os.Stat(filepath.Dir(hostDir))
+					if statErr != nil {
+						t.Fatalf("failed to stat ZAP parentDir: %v", statErr)
+					}
+					if parentInfo.Mode().Perm() != 0o700 {
+						t.Fatalf("expected ZAP parentDir to be 0700, got %o", parentInfo.Mode().Perm())
+					}
+				}
+			}
+		}
+		return runner.ToolExecutionResult{ExitCode: 0, OK: true}, nil
+	})
+	if err != nil || len(dockerCmds) != 3 {
+		t.Fatalf("expected 3 docker DAST commands, got %d (err=%v)", len(dockerCmds), err)
+	}
+	zapArgs := strings.Join(dockerCmds[1].Args, " ")
+	if !strings.Contains(zapArgs, "-e ZAP_AUTH_HEADER=Authorization") ||
+		!strings.Contains(zapArgs, "-e ZAP_AUTH_HEADER_VALUE=Bearer jwt-secret-123") {
+		t.Fatalf("expected ZAP_AUTH_HEADER env vars in docker ZAP command, got: %v", dockerCmds[1].Args)
+	}
+}
+
+func TestDiscoverOpenAPIURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/swagger/doc.json" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"swagger":"2.0","info":{"title":"Legacy"}}`))
+			return
+		}
+		if r.URL.Path == "/openapi.json" {
+			// 200 OK but not an OpenAPI/Swagger document
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html>not found</html>`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	got := dast.DiscoverOpenAPIURL(srv.URL)
+	if got != "/swagger/doc.json" {
+		t.Fatalf("expected /swagger/doc.json, got %q", got)
+	}
+
+	srvEmpty := httptest.NewServer(http.NotFoundHandler())
+	defer srvEmpty.Close()
+	if got := dast.DiscoverOpenAPIURL(srvEmpty.URL); got != "" {
+		t.Fatalf("expected empty string when no spec exists, got %q", got)
+	}
+}

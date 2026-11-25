@@ -20,12 +20,20 @@ const (
 	ProfileSoak     LoadProfile = "soak"
 )
 
+func normalizePath(p string) string {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		return "/" + trimmed
+	}
+	return trimmed
+}
+
 func GenerateK6Script(m types.BoilerplateManifest, baseURL string, profile LoadProfile) string {
 	targetBase := strings.TrimRight(baseURL, "/")
-	healthPath := m.Capabilities.Health.Path
-	if !strings.HasPrefix(healthPath, "/") {
-		healthPath = "/" + healthPath
-	}
+	healthPath := normalizePath(m.Capabilities.Health.Path)
 
 	var stagesJS, thresholdsJS string
 	switch profile {
@@ -40,7 +48,9 @@ func GenerateK6Script(m types.BoilerplateManifest, baseURL string, profile LoadP
 		thresholdsJS = `"http_req_duration": ["p(95)<250", "p(99)<500"], "http_req_failed": ["rate<0.005"]`
 	}
 
-	return fmt.Sprintf(`import http from "k6/http";
+	auth := m.Capabilities.Auth
+	if auth == nil || strings.TrimSpace(auth.Login.Path) == "" || strings.TrimSpace(auth.Me.Path) == "" {
+		return fmt.Sprintf(`import http from "k6/http";
 import { check, sleep } from "k6";
 
 export const options = {
@@ -60,6 +70,113 @@ export default function () {
   sleep(0.1);
 }
 `, stagesJS, thresholdsJS, targetBase, healthPath)
+	}
+
+	registerPath := normalizePath(auth.Register.Path)
+	loginPath := normalizePath(auth.Login.Path)
+	mePath := normalizePath(auth.Me.Path)
+
+	regEmailField := auth.Register.EmailField
+	if regEmailField == "" {
+		regEmailField = "email"
+	}
+	regPasswordField := auth.Register.PasswordField
+	if regPasswordField == "" {
+		regPasswordField = "password"
+	}
+	loginEmailField := auth.Login.EmailField
+	if loginEmailField == "" {
+		loginEmailField = "email"
+	}
+	loginPasswordField := auth.Login.PasswordField
+	if loginPasswordField == "" {
+		loginPasswordField = "password"
+	}
+	tokenPath := auth.Login.TokenPath
+	if tokenPath == "" {
+		tokenPath = "accessToken"
+	}
+
+	extraFieldsJS := "{}"
+	if len(auth.Register.ExtraFields) > 0 {
+		if b, err := json.Marshal(auth.Register.ExtraFields); err == nil {
+			extraFieldsJS = string(b)
+		}
+	}
+
+	registerBlock := ""
+	if registerPath != "" {
+		registerBlock = fmt.Sprintf(`  const regPayload = Object.assign({}, %s, { %q: email, %q: password });
+  http.post(BASE_URL + %q, JSON.stringify(regPayload), jsonHeaders);
+`, extraFieldsJS, regEmailField, regPasswordField, registerPath)
+	}
+
+	return fmt.Sprintf(`import http from "k6/http";
+import { check, sleep } from "k6";
+
+export const options = {
+  stages: %s,
+  thresholds: {
+    %s
+  }
+};
+
+const BASE_URL = __ENV.BASE_URL || %q;
+
+function extractPath(obj, dotPath) {
+  if (!obj || !dotPath) {
+    return "";
+  }
+  const cleaned = String(dotPath).replace(/^\$\.?/, "").replace(/^\./, "");
+  if (!cleaned) {
+    return "";
+  }
+  const parts = cleaned.split(".");
+  let curr = obj;
+  for (let i = 0; i < parts.length; i++) {
+    if (!parts[i]) {
+      continue;
+    }
+    if (curr == null || typeof curr !== "object" || !(parts[i] in curr)) {
+      return "";
+    }
+    curr = curr[parts[i]];
+  }
+  return typeof curr === "string" ? curr : "";
+}
+
+export function setup() {
+  const email = "k6-load-" + Date.now() + "-" + Math.floor(Math.random() * 100000) + "@example.com";
+  const password = "K6LoadTest!2026#Secure";
+  const jsonHeaders = { headers: { "Content-Type": "application/json" } };
+%s  const loginPayload = { %q: email, %q: password };
+  const loginRes = http.post(BASE_URL + %q, JSON.stringify(loginPayload), jsonHeaders);
+  let token = "";
+  try {
+    const parsed = loginRes.json();
+    token = extractPath(parsed, %q);
+  } catch (_) {
+    token = "";
+  }
+  return { token: token };
+}
+
+export default function (data) {
+  const healthRes = http.get(BASE_URL + %q);
+  check(healthRes, {
+    "health status is 2xx": (r) => r.status >= 200 && r.status < 300,
+  });
+  if (data && data.token) {
+    const meRes = http.get(BASE_URL + %q, {
+      headers: { Authorization: "Bearer " + data.token },
+    });
+    check(meRes, {
+      "me status is 2xx": (r) => r.status >= 200 && r.status < 300,
+    });
+  }
+  sleep(0.1);
+}
+`, stagesJS, thresholdsJS, targetBase, registerBlock, loginEmailField, loginPasswordField, loginPath, tokenPath, healthPath, mePath)
 }
 
 type k6SummaryDoc struct {

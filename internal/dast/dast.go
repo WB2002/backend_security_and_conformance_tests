@@ -6,10 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/runner"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
@@ -173,35 +176,94 @@ func ParseSchemathesisOutput(stdout string, exitCode int) []types.SecurityFindin
 	return findings
 }
 
+type DASTOptions struct {
+	BaseURL        string
+	OpenAPIURL     string
+	BearerToken    string
+	RequireOpenAPI bool
+	Mode           runner.ExecutionMode
+}
+
+var openAPICandidatePaths = []string{
+	"/openapi.json",
+	"/api/openapi.json",
+	"/swagger/doc.json",
+	"/api-json",
+	"/docs/openapi.json",
+}
+
+func DiscoverOpenAPIURL(baseURL string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if trimmed == "" {
+		return ""
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	for _, path := range openAPICandidatePaths {
+		resp, err := client.Get(trimmed + path)
+		if err != nil {
+			continue
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+		_ = resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		body := string(raw)
+		if strings.Contains(body, `"openapi"`) || strings.Contains(body, `"swagger"`) ||
+			strings.Contains(body, "openapi:") || strings.Contains(body, "swagger:") {
+			return path
+		}
+	}
+	return ""
+}
+
 func RunDASTSuite(ctx context.Context, baseURL string, openapiURL string, mode runner.ExecutionMode, execFn runner.CommandExecutor) ([]types.SecurityFinding, error) {
+	return RunDASTSuiteWithOptions(ctx, DASTOptions{
+		BaseURL:    baseURL,
+		OpenAPIURL: openapiURL,
+		Mode:       mode,
+	}, execFn)
+}
+
+func RunDASTSuiteWithOptions(ctx context.Context, opts DASTOptions, execFn runner.CommandExecutor) ([]types.SecurityFinding, error) {
 	var all []types.SecurityFinding
 
 	targetURLFor := func(tool runner.ToolName, raw string) string {
 		u := strings.TrimRight(raw, "/")
-		if runner.ResolveEffectiveMode(mode, tool) == runner.ModeDocker {
+		if runner.ResolveEffectiveMode(opts.Mode, tool) == runner.ModeDocker {
 			return runner.RewriteURLForDocker(u)
 		}
 		return u
 	}
 
+	resolvedOpenAPI := strings.TrimSpace(opts.OpenAPIURL)
+	if resolvedOpenAPI == "" {
+		resolvedOpenAPI = DiscoverOpenAPIURL(opts.BaseURL)
+	}
+
 	openAPIFor := func(tool runner.ToolName) string {
-		if openapiURL == "" {
+		if resolvedOpenAPI == "" {
 			return ""
 		}
-		full := openapiURL
+		full := resolvedOpenAPI
 		if !strings.HasPrefix(full, "http://") && !strings.HasPrefix(full, "https://") {
 			if !strings.HasPrefix(full, "/") {
 				full = "/" + full
 			}
-			full = strings.TrimRight(baseURL, "/") + full
+			full = strings.TrimRight(opts.BaseURL, "/") + full
 		}
 		return targetURLFor(tool, full)
 	}
 
+	nucleiArgs := []string{"-u", targetURLFor(runner.ToolNuclei, opts.BaseURL), "-jsonl", "-silent"}
+	if opts.BearerToken != "" {
+		nucleiArgs = append(nucleiArgs, "-H", "Authorization: Bearer "+opts.BearerToken)
+	}
+
 	nucleiRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolNuclei,
-		Args:             []string{"-u", targetURLFor(runner.ToolNuclei, baseURL), "-jsonl", "-silent"},
-		Mode:             mode,
+		Args:             nucleiArgs,
+		Mode:             opts.Mode,
 		AllowedExitCodes: []int{0, 1},
 	}, execFn)
 	if err != nil {
@@ -215,24 +277,33 @@ func RunDASTSuite(ctx context.Context, baseURL string, openapiURL string, mode r
 		all = append(all, f...)
 	}
 
-	if openapiURL != "" {
-		tmpDir, tErr := os.MkdirTemp("", "zap-conformance-*")
+	if resolvedOpenAPI != "" {
+		parentDir, outDir, tErr := runner.CreateIsolatedWorkDir("zap-conformance-")
 		if tErr != nil {
 			return nil, tErr
 		}
-		defer os.RemoveAll(tmpDir)
+		defer os.RemoveAll(parentDir)
 
-		zapReportFile := filepath.Join(tmpDir, "zap-report.json")
+		zapReportFile := filepath.Join(outDir, "zap-report.json")
 		zapReportArg := zapReportFile
-		if runner.ResolveEffectiveMode(mode, runner.ToolZAP) == runner.ModeDocker {
+		if runner.ResolveEffectiveMode(opts.Mode, runner.ToolZAP) == runner.ModeDocker {
 			zapReportArg = "zap-report.json" // written inside /zap/wrk
+		}
+
+		var zapEnv []string
+		if opts.BearerToken != "" {
+			zapEnv = []string{
+				"ZAP_AUTH_HEADER=Authorization",
+				"ZAP_AUTH_HEADER_VALUE=Bearer " + opts.BearerToken,
+			}
 		}
 
 		zapRes, zErr := runner.RunTool(ctx, runner.ToolInvocationOptions{
 			Tool:             runner.ToolZAP,
 			Args:             []string{"zap-api-scan.py", "-t", openAPIFor(runner.ToolZAP), "-f", "openapi", "-J", zapReportArg},
-			WorkDir:          tmpDir,
-			Mode:             mode,
+			WorkDir:          outDir,
+			Mode:             opts.Mode,
+			Env:              zapEnv,
 			AllowedExitCodes: []int{0, 1, 2},
 		}, execFn)
 		if zErr != nil {
@@ -250,16 +321,30 @@ func RunDASTSuite(ctx context.Context, baseURL string, openapiURL string, mode r
 			all = append(all, f...)
 		}
 
+		schemaArgs := []string{"run", openAPIFor(runner.ToolSchemathesis), "--checks", "all"}
+		if opts.BearerToken != "" {
+			schemaArgs = append(schemaArgs, "-H", "Authorization: Bearer "+opts.BearerToken)
+		}
+
 		schemaRes, sErr := runner.RunTool(ctx, runner.ToolInvocationOptions{
 			Tool:             runner.ToolSchemathesis,
-			Args:             []string{"run", openAPIFor(runner.ToolSchemathesis), "--checks", "all"},
-			Mode:             mode,
+			Args:             schemaArgs,
+			Mode:             opts.Mode,
 			AllowedExitCodes: []int{0, 1},
 		}, execFn)
 		if sErr != nil {
 			return nil, fmt.Errorf("schemathesis execution failed: %w", sErr)
 		}
 		all = append(all, ParseSchemathesisOutput(schemaRes.Stdout, schemaRes.ExitCode)...)
+	} else if opts.RequireOpenAPI {
+		all = append(all, types.SecurityFinding{
+			ID:       "dast-openapi-missing",
+			Category: types.CategoryDAST,
+			Tool:     "conformance-dast",
+			Severity: types.SeverityHigh,
+			Title:    "OpenAPI schema unavailable for ZAP and Schemathesis fuzzing",
+			Endpoint: opts.BaseURL,
+		})
 	}
 
 	return all, nil

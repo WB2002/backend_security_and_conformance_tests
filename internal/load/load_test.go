@@ -111,3 +111,24 @@ func TestRunK6LoadTest_DockerReadablePermissions(t *testing.T) {
 		t.Fatalf("expected nil memory analysis when container name is empty, got %+v", got)
 	}
 }
+
+func TestGenerateK6Script_AuthenticatedMultiEndpointMix(t *testing.T) {
+	m, _ := manifest.ParseAndValidateManifest([]byte(`{
+		"name": "auth-api",
+		"language": "typescript",
+		"capabilities": {
+			"health": { "path": "/health/live" },
+			"auth": {
+				"register": { "path": "/auth/register" },
+				"login": { "path": "/auth/login", "tokenPath": "data.accessToken" },
+				"me": { "path": "/auth/me" }
+			}
+		}
+	}`))
+	script := load.GenerateK6Script(m, "http://127.0.0.1:3000", load.ProfileBaseline)
+	for _, want := range []string{"export function setup()", "/auth/register", "/auth/login", "/auth/me", "Authorization"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected authenticated k6 script to contain %q, got:\n%s", want, script)
+		}
+	}
+}
