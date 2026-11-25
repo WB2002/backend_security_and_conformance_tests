@@ -332,8 +332,7 @@ jobs:
       - name: literal-with-comment
         run: | # inline comment
           echo "${{ github.event.comment.body }}"
-      - name: comment-only-not-block
-        run: # comment only
+      - run: # comment only
         env:
           TITLE: ${{ github.event.issue.title }}
 `
