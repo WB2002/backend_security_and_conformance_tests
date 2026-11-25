@@ -102,11 +102,17 @@ func TestCreateIsolatedWorkDirAndHardenedDockerInvocation(t *testing.T) {
 	defer os.RemoveAll(parentDir)
 
 	pInfo, err := os.Stat(parentDir)
-	if err != nil || pInfo.Mode().Perm() != 0o700 {
-		t.Fatalf("expected 0700 parent dir, got %v (err=%v)", pInfo.Mode().Perm(), err)
+	if err != nil {
+		t.Fatalf("os.Stat(%s) failed: %v", parentDir, err)
+	}
+	if pInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("expected 0700 parent dir, got %o", pInfo.Mode().Perm())
 	}
 	oInfo, err := os.Stat(outDir)
-	if err != nil || oInfo.Mode().Perm()&0o007 != 0o007 {
+	if err != nil {
+		t.Fatalf("os.Stat(%s) failed: %v", outDir, err)
+	}
+	if oInfo.Mode().Perm()&0o007 != 0o007 {
 		t.Fatalf("expected world-writable child outDir inside 0700 parent for non-root container UIDs, got %o", oInfo.Mode().Perm())
 	}
 
@@ -128,10 +134,22 @@ func TestCreateIsolatedWorkDirAndHardenedDockerInvocation(t *testing.T) {
 	if slices.Contains(gCmd.Args, "--add-host=host.docker.internal:host-gateway") {
 		t.Fatalf("repo scanner must NOT map host.docker.internal: %v", gCmd.Args)
 	}
-	if !strings.Contains(runner.PinnedToolImage(runner.ToolZAP), "ghcr.io/zaproxy/zaproxy:2.16.0@sha256:") ||
-		!strings.Contains(runner.PinnedToolImage(runner.ToolNuclei), "projectdiscovery/nuclei:v3.3.8@sha256:") ||
-		!strings.Contains(runner.PinnedToolImage(runner.ToolSchemathesis), "schemathesis/schemathesis:v3.39.8@sha256:") {
-		t.Fatalf("expected pinned non-stable @sha256 images for ZAP, Nuclei, Schemathesis")
+	allTools := []runner.ToolName{
+		runner.ToolSemgrep,
+		runner.ToolGitleaks,
+		runner.ToolTrivy,
+		runner.ToolCdxgen,
+		runner.ToolOSVScanner,
+		runner.ToolZAP,
+		runner.ToolNuclei,
+		runner.ToolSchemathesis,
+		runner.ToolK6,
+	}
+	for _, tool := range allTools {
+		img := runner.PinnedToolImage(tool)
+		if !strings.Contains(img, "@sha256:") || strings.Contains(img, ":latest") || strings.Contains(img, ":stable") {
+			t.Fatalf("expected digest-pinned non-floating image for %s, got %q", tool, img)
+		}
 	}
 
 	// Explicit NetworkDisabled override on a normally networked tool
@@ -144,6 +162,23 @@ func TestCreateIsolatedWorkDirAndHardenedDockerInvocation(t *testing.T) {
 	})
 	if err != nil || !slices.Contains(offlineCmd.Args, "--network=none") {
 		t.Fatalf("expected --network=none when NetworkDisabled=true: %v (err=%v)", offlineCmd.Args, err)
+	}
+
+	// Explicit NetworkDisabled override on a NeedsHostGateway tool MUST omit --add-host
+	offlineNetCmd, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
+		Tool:            runner.ToolNuclei,
+		Args:            []string{"-u", "http://host.docker.internal:3000"},
+		Mode:            runner.ModeDocker,
+		NetworkDisabled: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildToolInvocation offline nuclei failed: %v", err)
+	}
+	if !slices.Contains(offlineNetCmd.Args, "--network=none") {
+		t.Fatalf("expected --network=none for offline nuclei: %v", offlineNetCmd.Args)
+	}
+	if slices.Contains(offlineNetCmd.Args, "--add-host=host.docker.internal:host-gateway") {
+		t.Fatalf("expected --add-host omitted when NetworkDisabled=true: %v", offlineNetCmd.Args)
 	}
 
 	// Dynamic network tool (Nuclei): MUST map host.docker.internal and NOT set --network=none

@@ -166,10 +166,11 @@ func BuildToolInvocation(opts ToolInvocationOptions) (ResolvedCommand, error) {
 		"--security-opt=no-new-privileges",
 		"--pids-limit=512",
 	}
-	if spec.NeedsHostGateway {
+	offline := opts.NetworkDisabled || spec.DefaultOffline
+	if spec.NeedsHostGateway && !offline {
 		dockerArgs = append(dockerArgs, "--add-host=host.docker.internal:host-gateway")
 	}
-	if opts.NetworkDisabled || spec.DefaultOffline {
+	if offline {
 		dockerArgs = append(dockerArgs, "--network=none")
 	}
 	if opts.TargetDir != "" {
