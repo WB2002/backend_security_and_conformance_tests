@@ -19,7 +19,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.23"
-          cache: true
+          cache: false
 
       - name: Run go vet
         run: go vet ./...
@@ -31,7 +31,7 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.3 ./...
 
       - name: Build conformance-audit binary
-        run: go build -o ./bin/conformance-audit ./cmd/conformance-audit
+        run: CGO_ENABLED=0 go build -o ./bin/conformance-audit ./cmd/conformance-audit
 
       - name: Dogfood supplychain and source-graph self-audit
         run: ./bin/conformance-audit --target . --stages supplychain,source-graph --mode local --output reports

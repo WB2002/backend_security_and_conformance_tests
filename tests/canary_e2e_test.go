@@ -565,7 +565,11 @@ func Verify(tok string) bool {
 					if err != nil {
 						return nil, err
 					}
-					if err := validateSafeExternalURL("http://" + host); err != nil {
+					if ip := net.ParseIP(host); ip != nil {
+						if isDisallowedIP(ip) {
+							return nil, fmt.Errorf("disallowed IP %s", ip)
+						}
+					} else if err := validateSafeExternalURL("http://" + host); err != nil {
 						return nil, err
 					}
 					return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, addr)
@@ -583,6 +587,22 @@ func Verify(tok string) bool {
 				return false
 			}
 			return r.Header.Get("X-CSRF-Token") == csrfCookie.Value
+		}
+
+		setHardenedAuthCookies := func(w http.ResponseWriter, ref, csrfVal string) {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "session_id",
+				Value:    "sess-" + ref,
+				HttpOnly: true,
+				SameSite: http.SameSiteStrictMode,
+				Path:     "/",
+			})
+			http.SetCookie(w, &http.Cookie{
+				Name:     "csrf_token",
+				Value:    csrfVal,
+				SameSite: http.SameSiteStrictMode,
+				Path:     "/",
+			})
 		}
 
 		hardenedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -662,19 +682,7 @@ func Verify(tok string) bool {
 				acc := signJWT(email, rec.Role)
 				mu.Unlock()
 
-				http.SetCookie(w, &http.Cookie{
-					Name:     "session_id",
-					Value:    "sess-" + ref,
-					HttpOnly: true,
-					SameSite: http.SameSiteStrictMode,
-					Path:     "/",
-				})
-				http.SetCookie(w, &http.Cookie{
-					Name:     "csrf_token",
-					Value:    csrfVal,
-					SameSite: http.SameSiteStrictMode,
-					Path:     "/",
-				})
+				setHardenedAuthCookies(w, ref, csrfVal)
 				w.WriteHeader(http.StatusOK)
 				_ = json.NewEncoder(w).Encode(map[string]any{"accessToken": acc, "refreshToken": ref})
 			case r.URL.Path == "/auth/refresh" && r.Method == http.MethodPost:
@@ -700,19 +708,7 @@ func Verify(tok string) bool {
 				newAcc := signJWT(rec.Email, uRec.Role)
 				mu.Unlock()
 
-				http.SetCookie(w, &http.Cookie{
-					Name:     "session_id",
-					Value:    "sess-" + newRef,
-					HttpOnly: true,
-					SameSite: http.SameSiteStrictMode,
-					Path:     "/",
-				})
-				http.SetCookie(w, &http.Cookie{
-					Name:     "csrf_token",
-					Value:    newCSRF,
-					SameSite: http.SameSiteStrictMode,
-					Path:     "/",
-				})
+				setHardenedAuthCookies(w, newRef, newCSRF)
 				w.WriteHeader(http.StatusOK)
 				_ = json.NewEncoder(w).Encode(map[string]any{"accessToken": newAcc, "refreshToken": newRef})
 			case r.URL.Path == "/auth/me":
@@ -859,6 +855,9 @@ func Verify(tok string) bool {
 		ptResults, err := pentest.RunAutomatedPenTestSuite(context.Background(), hardenedSrv.URL, m, canary.Port())
 		if err != nil {
 			t.Fatalf("pentest suite error: %v", err)
+		}
+		if len(ptResults) != 18 {
+			t.Fatalf("expected 18 pen-test checks, got %d: %+v", len(ptResults), ptResults)
 		}
 		for _, pt := range ptResults {
 			if pt.Status != "passed" {

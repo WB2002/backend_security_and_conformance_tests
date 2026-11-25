@@ -494,8 +494,13 @@ func scanObfuscatedPayloads(relPath, content string) []types.SecurityFinding {
 
 func isTestSourceFile(name string) bool {
 	lower := strings.ToLower(name)
+	if strings.HasPrefix(lower, "test_") && strings.HasSuffix(lower, ".py") {
+		return true
+	}
 	for _, suffix := range []string{
 		"_test.go",
+		"_test.py",
+		"_test.exs",
 		".test.ts", ".spec.ts",
 		".test.tsx", ".spec.tsx",
 		".test.js", ".spec.js",

