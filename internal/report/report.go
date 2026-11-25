@@ -1,6 +1,7 @@
 package report
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -13,6 +14,7 @@ import (
 
 type ReportBundlePaths struct {
 	ScorecardPath string
+	ChecksumPath  string
 	SARIFPath     string
 	MermaidPath   string
 	HTMLPath      string
@@ -36,11 +38,21 @@ func sanitizeMermaidID(raw string) string {
 	return b.String()
 }
 
+var mermaidLabelReplacer = strings.NewReplacer(
+	`"`, `'`,
+	"\r", "",
+	"\n", " ",
+	"[", "&#91;",
+	"]", "&#93;",
+	"(", "&#40;",
+	")", "&#41;",
+	"<", "&lt;",
+	">", "&gt;",
+	"`", "&#96;",
+)
+
 func escapeMermaidLabel(raw string) string {
-	s := strings.ReplaceAll(raw, `"`, `'`)
-	s = strings.ReplaceAll(s, "\r", "")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return s
+	return mermaidLabelReplacer.Replace(raw)
 }
 
 func GenerateMermaidDependencyGraph(card types.ConformanceScorecard) string {
@@ -245,8 +257,9 @@ func GenerateHTMLDashboard(card types.ConformanceScorecard, policyRes types.Poli
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; img-src data:;">
 <title>Conformance Audit Dashboard — ` + html.EscapeString(card.TargetName) + `</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js" integrity="sha384-J7Q85oZE4GJ/e7+n2aOQsLXfDwwfnA8S2nZAL5BpFsfpCF84zQD7LroZ/dMnLgex" crossorigin="anonymous"></script>
 <style>
   body { font-family: system-ui, -apple-system, sans-serif; margin: 24px; background: #0f172a; color: #f8fafc; }
   h1, h2 { color: #e2e8f0; }
@@ -384,6 +397,7 @@ func WriteReportBundle(outputDir string, card types.ConformanceScorecard, policy
 
 	paths := ReportBundlePaths{
 		ScorecardPath: filepath.Join(outputDir, "scorecard.json"),
+		ChecksumPath:  filepath.Join(outputDir, "scorecard.sha256"),
 		SARIFPath:     filepath.Join(outputDir, "results.sarif"),
 		MermaidPath:   filepath.Join(outputDir, "dependency-graph.mmd"),
 		HTMLPath:      filepath.Join(outputDir, "dashboard.html"),
@@ -401,6 +415,12 @@ func WriteReportBundle(outputDir string, card types.ConformanceScorecard, policy
 		return paths, err
 	}
 	if err := os.WriteFile(paths.ScorecardPath, scBytes, 0644); err != nil {
+		return paths, err
+	}
+
+	sum := sha256.Sum256(scBytes)
+	checksumContent := fmt.Sprintf("%x  scorecard.json\n", sum)
+	if err := os.WriteFile(paths.ChecksumPath, []byte(checksumContent), 0644); err != nil {
 		return paths, err
 	}
 

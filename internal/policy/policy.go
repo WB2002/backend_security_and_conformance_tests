@@ -12,8 +12,10 @@ func StrictSecurityPolicy() types.SecurityPolicy {
 		FailOnAnyPackageCycle: true,
 		MaxCriticalFindings:   0,
 		MaxHighFindings:       0,
+		MaxMalwareFindings:    0,
 		MaxPenTestFailures:    0,
 		RequireLoadTestPass:   true,
+		RequireMemoryOnSoak:   true,
 		MaxMemoryDriftPercent: 20.0,
 	}
 }
@@ -29,8 +31,11 @@ func EvaluateSecurityPolicy(scorecard types.ConformanceScorecard, policy types.S
 		violations = append(violations, fmt.Sprintf("detected %d package dependency cycle(s)", len(scorecard.PackageGraph.Cycles)))
 	}
 
-	var criticalCount, highCount int
+	var criticalCount, highCount, malwareCount int
 	for _, f := range scorecard.Findings {
+		if f.Category == types.CategoryMalware {
+			malwareCount++
+		}
 		switch f.Severity {
 		case types.SeverityCritical:
 			criticalCount++
@@ -39,6 +44,9 @@ func EvaluateSecurityPolicy(scorecard types.ConformanceScorecard, policy types.S
 		}
 	}
 
+	if malwareCount > policy.MaxMalwareFindings {
+		violations = append(violations, fmt.Sprintf("malware findings (%d) exceed maximum allowed (%d)", malwareCount, policy.MaxMalwareFindings))
+	}
 	if criticalCount > policy.MaxCriticalFindings {
 		violations = append(violations, fmt.Sprintf("critical findings (%d) exceed maximum allowed (%d)", criticalCount, policy.MaxCriticalFindings))
 	}
@@ -58,6 +66,10 @@ func EvaluateSecurityPolicy(scorecard types.ConformanceScorecard, policy types.S
 
 	if policy.RequireLoadTestPass && scorecard.LoadTest != nil && !scorecard.LoadTest.Passed {
 		violations = append(violations, fmt.Sprintf("load test profile %q failed SLA thresholds", scorecard.LoadTest.Profile))
+	}
+
+	if policy.RequireMemoryOnSoak && scorecard.LoadTest != nil && scorecard.LoadTest.Profile == "soak" && scorecard.MemoryAnalysis == nil {
+		violations = append(violations, "soak load test requires memory telemetry (--container or --pid) for leak analysis")
 	}
 
 	if scorecard.MemoryAnalysis != nil {

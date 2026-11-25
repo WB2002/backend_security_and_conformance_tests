@@ -182,13 +182,27 @@ type MemoryLeakAnalysis struct {
 }
 
 type SecurityPolicy struct {
-	FailOnAnySourceCycle   bool    `json:"failOnAnySourceCycle"`
-	FailOnAnyPackageCycle  bool    `json:"failOnAnyPackageCycle"`
-	MaxCriticalFindings    int     `json:"maxCriticalFindings"`
-	MaxHighFindings        int     `json:"maxHighFindings"`
-	MaxPenTestFailures     int     `json:"maxPenTestFailures"`
-	RequireLoadTestPass    bool    `json:"requireLoadTestPass"`
-	MaxMemoryDriftPercent  float64 `json:"maxMemoryDriftPercent"`
+	FailOnAnySourceCycle  bool    `json:"failOnAnySourceCycle"`
+	FailOnAnyPackageCycle bool    `json:"failOnAnyPackageCycle"`
+	MaxCriticalFindings   int     `json:"maxCriticalFindings"`
+	MaxHighFindings       int     `json:"maxHighFindings"`
+	MaxMalwareFindings    int     `json:"maxMalwareFindings"`
+	MaxPenTestFailures    int     `json:"maxPenTestFailures"`
+	RequireLoadTestPass   bool    `json:"requireLoadTestPass"`
+	RequireMemoryOnSoak   bool    `json:"requireMemoryOnSoak"`
+	MaxMemoryDriftPercent float64 `json:"maxMemoryDriftPercent"`
+}
+
+type SecurityWaiver struct {
+	FindingID     string `json:"findingId,omitempty"`
+	RuleOrCVE     string `json:"ruleOrCve,omitempty"`
+	Justification string `json:"justification"`
+	ApprovedBy    string `json:"approvedBy"`
+	ExpiresAt     string `json:"expiresAt"`
+}
+
+type WaiverFile struct {
+	Waivers []SecurityWaiver `json:"waivers"`
 }
 
 type PolicyEvaluationResult struct {

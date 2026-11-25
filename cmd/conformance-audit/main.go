@@ -22,6 +22,7 @@ import (
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/report"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/runner"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/sast"
+	"github.com/pc/backend-boilerplate-conformance-tests/internal/supplychain"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
 )
 
@@ -41,6 +42,9 @@ func detectRepoLanguage(targetDir string) types.BoilerplateLanguage {
 	if _, err := os.Stat(filepath.Join(targetDir, "tsconfig.json")); err == nil {
 		return types.LangTypeScript
 	}
+	if _, err := os.Stat(filepath.Join(targetDir, "package.json")); err == nil {
+		return types.LangTypeScript
+	}
 	return types.LangTypeScript
 }
 
@@ -51,10 +55,13 @@ func main() {
 	targetFlag := flag.String("target", "", "Path to target boilerplate source repository")
 	urlFlag := flag.String("url", cfg.BaseURL, "Running boilerplate Base URL")
 	manifestFlag := flag.String("manifest", "", "Path to boilerplate.manifest.json")
-	stagesFlag := flag.String("stages", "sast,graph,dast,pentest,load", "Comma-separated stages to execute")
+	stagesFlag := flag.String("stages", "supplychain,sast,graph,dast,pentest,load", "Comma-separated stages to execute")
 	profileFlag := flag.String("profile", string(load.ProfileBaseline), "k6 load profile (baseline|stress|soak)")
-	outputFlag := flag.String("output", "reports", "Output directory for 4-part report bundle")
+	outputFlag := flag.String("output", "reports", "Output directory for report bundle")
 	modeFlag := flag.String("mode", string(runner.ModeAuto), "Tool execution mode (auto|docker|local)")
+	imageFlag := flag.String("image", "", "Optional container image reference to scan with Trivy")
+	policyFlag := flag.String("policy", "", "Optional path to custom security policy JSON file")
+	waiversFlag := flag.String("waivers", "", "Optional path to expiring security waivers JSON file")
 	containerFlag := flag.String("container", os.Getenv("CONFORMANCE_TARGET_CONTAINER"), "Optional Docker container name/ID to sample for memory leak detection")
 	pidFlag := flag.Int("pid", defaultPID, "Optional host process PID to sample for memory leak detection")
 	flag.Parse()
@@ -118,7 +125,39 @@ func main() {
 
 	ctx := context.Background()
 	execMode := runner.ExecutionMode(*modeFlag)
+
 	pol := policy.StrictSecurityPolicy()
+	if strings.TrimSpace(*policyFlag) != "" {
+		loadedPol, err := policy.LoadPolicyFile(*policyFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading policy %s: %v\n", *policyFlag, err)
+			os.Exit(2)
+		}
+		pol = loadedPol
+	}
+
+	var waiverFile types.WaiverFile
+	hasWaivers := false
+	if strings.TrimSpace(*waiversFlag) != "" {
+		loadedWaivers, err := policy.LoadWaiverFile(*waiversFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading waivers %s: %v\n", *waiversFlag, err)
+			os.Exit(2)
+		}
+		waiverFile = loadedWaivers
+		hasWaivers = true
+	} else if targetDir != "" {
+		defaultWaivers := filepath.Join(targetDir, ".conformance-waivers.json")
+		if _, err := os.Stat(defaultWaivers); err == nil {
+			loadedWaivers, wErr := policy.LoadWaiverFile(defaultWaivers)
+			if wErr != nil {
+				fmt.Fprintf(os.Stderr, "Error loading waivers %s: %v\n", defaultWaivers, wErr)
+				os.Exit(2)
+			}
+			waiverFile = loadedWaivers
+			hasWaivers = true
+		}
+	}
 
 	card := types.ConformanceScorecard{
 		TargetName: m.Name,
@@ -128,6 +167,14 @@ func main() {
 
 	var stageErrors []string
 
+	if targetDir != "" && hasStage("supplychain") {
+		scFindings, err := supplychain.ScanRepository(targetDir, m.Language)
+		if err != nil {
+			stageErrors = append(stageErrors, fmt.Sprintf("Supply-chain stage execution error: %v", err))
+		}
+		card.Findings = append(card.Findings, scFindings...)
+	}
+
 	if targetDir != "" && hasStage("sast") {
 		findings, err := sast.RunSASTSuite(ctx, targetDir, execMode, nil)
 		if err != nil {
@@ -136,16 +183,29 @@ func main() {
 		card.Findings = append(card.Findings, findings...)
 	}
 
-	if targetDir != "" && hasStage("graph") {
+	if strings.TrimSpace(*imageFlag) != "" && hasStage("sast") {
+		imgFindings, err := sast.RunTrivyImageScan(ctx, *imageFlag, execMode, nil)
+		if err != nil {
+			stageErrors = append(stageErrors, fmt.Sprintf("Container image scan error: %v", err))
+		}
+		card.Findings = append(card.Findings, imgFindings...)
+	}
+
+	if targetDir != "" && (hasStage("graph") || hasStage("source-graph")) {
 		srcG, err := graph.BuildSourceGraphFromDir(targetDir, m.Language)
 		if err != nil {
 			stageErrors = append(stageErrors, fmt.Sprintf("Source graph build error: %v", err))
 		}
-		sbomG, scaFindings, sbomErr := graph.RunSBOMAndOSVScan(ctx, targetDir, execMode, nil)
-		if sbomErr != nil {
-			stageErrors = append(stageErrors, fmt.Sprintf("SBOM/OSV graph stage error: %v", sbomErr))
-		} else {
-			card.Findings = append(card.Findings, scaFindings...)
+		var sbomG types.DependencyGraph
+		if hasStage("graph") {
+			var scaFindings []types.SecurityFinding
+			var sbomErr error
+			sbomG, scaFindings, sbomErr = graph.RunSBOMAndOSVScan(ctx, targetDir, execMode, nil)
+			if sbomErr != nil {
+				stageErrors = append(stageErrors, fmt.Sprintf("SBOM/OSV graph stage error: %v", sbomErr))
+			} else {
+				card.Findings = append(card.Findings, scaFindings...)
+			}
 		}
 		analyzedSrc, analyzedPkg := graph.AnalyzeDependencyGraphs(srcG, sbomG, card.Findings)
 		card.SourceGraph = analyzedSrc
@@ -153,7 +213,22 @@ func main() {
 	}
 
 	if *urlFlag != "" && hasStage("dast") {
-		dFindings, err := dast.RunDASTSuite(ctx, *urlFlag, m.OpenAPIURL, execMode, nil)
+		var bearerToken string
+		if m.Capabilities.Auth != nil {
+			tok, tokErr := pentest.AcquireBearerToken(*urlFlag, m)
+			if tokErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not acquire DAST bearer token: %v\n", tokErr)
+			} else {
+				bearerToken = tok
+			}
+		}
+		dFindings, err := dast.RunDASTSuiteWithOptions(ctx, dast.DASTOptions{
+			BaseURL:        *urlFlag,
+			OpenAPIURL:     m.OpenAPIURL,
+			BearerToken:    bearerToken,
+			RequireOpenAPI: slices.Contains(stages, "dast"),
+			Mode:           execMode,
+		}, nil)
 		if err != nil {
 			stageErrors = append(stageErrors, fmt.Sprintf("DAST stage execution error: %v", err))
 		}
@@ -196,7 +271,16 @@ func main() {
 		}
 	}
 
+	var waiverErrs []string
+	if hasWaivers {
+		card, waiverErrs = policy.ApplySecurityWaivers(card, waiverFile, time.Now().UTC())
+	}
+
 	polRes := policy.EvaluateSecurityPolicy(card, pol)
+	if len(waiverErrs) > 0 {
+		polRes.Passed = false
+		polRes.Violations = append(polRes.Violations, waiverErrs...)
+	}
 	if len(stageErrors) > 0 {
 		polRes.Passed = false
 		polRes.Violations = append(polRes.Violations, stageErrors...)
@@ -211,6 +295,7 @@ func main() {
 
 	fmt.Printf("Report bundle generated for %s:\n", card.TargetName)
 	fmt.Printf("  Scorecard: %s\n", paths.ScorecardPath)
+	fmt.Printf("  Checksum:  %s\n", paths.ChecksumPath)
 	fmt.Printf("  SARIF 2.1: %s\n", paths.SARIFPath)
 	fmt.Printf("  Mermaid:   %s\n", paths.MermaidPath)
 	fmt.Printf("  Dashboard: %s\n", paths.HTMLPath)

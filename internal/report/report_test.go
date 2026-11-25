@@ -1,6 +1,8 @@
 package report_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"strings"
@@ -32,7 +34,7 @@ func TestReportBundleGeneration(t *testing.T) {
 		SourceGraph: types.DependencyGraph{
 			Nodes: []types.GraphNode{
 				{ID: "lib/app/auth.ex", Label: "lib/app/auth.ex", Type: "module", Sinks: []string{"auth"}},
-				{ID: "lib/app/users.ex", Label: "lib/app/users.ex", Type: "module", Sinks: []string{"db"}},
+				{ID: "lib/app/users.ex", Label: "lib/app/users.ex [evil](x)", Type: "module", Sinks: []string{"db"}},
 			},
 			Edges: []types.GraphEdge{
 				{From: "lib/app/auth.ex", To: "lib/app/users.ex", Kind: "import"},
@@ -55,6 +57,9 @@ func TestReportBundleGeneration(t *testing.T) {
 	mmd := report.GenerateMermaidDependencyGraph(card)
 	if !strings.Contains(mmd, "flowchart LR") || !strings.Contains(mmd, "toxicCycle") {
 		t.Fatalf("unexpected mermaid output:\n%s", mmd)
+	}
+	if strings.Contains(mmd, "[evil](x)") {
+		t.Fatalf("expected Mermaid label injection `[evil](x)` to be escaped, got:\n%s", mmd)
 	}
 
 	sarifBytes, err := report.GenerateSARIFReport(card)
@@ -91,6 +96,30 @@ func TestReportBundleGeneration(t *testing.T) {
 	}
 	if !strings.Contains(htmlStr, "cytoscape") {
 		t.Fatalf("expected interactive Cytoscape graph viewer in dashboard.html")
+	}
+	if !strings.Contains(htmlStr, "Content-Security-Policy") {
+		t.Fatalf("expected Content-Security-Policy meta tag in dashboard.html")
+	}
+	const expectedSRI = "sha384-J7Q85oZE4GJ/e7+n2aOQsLXfDwwfnA8S2nZAL5BpFsfpCF84zQD7LroZ/dMnLgex"
+	if !strings.Contains(htmlStr, expectedSRI) || !strings.Contains(htmlStr, `crossorigin="anonymous"`) {
+		t.Fatalf("expected Cytoscape SRI integrity %q and crossorigin=\"anonymous\" in dashboard.html", expectedSRI)
+	}
+
+	if paths.ChecksumPath == "" {
+		t.Fatalf("expected ChecksumPath to be populated")
+	}
+	checksumBytes, err := os.ReadFile(paths.ChecksumPath)
+	if err != nil {
+		t.Fatalf("failed to read scorecard.sha256: %v", err)
+	}
+	scorecardBytes, err := os.ReadFile(paths.ScorecardPath)
+	if err != nil {
+		t.Fatalf("failed to read scorecard.json: %v", err)
+	}
+	expectedSum := sha256.Sum256(scorecardBytes)
+	expectedHex := hex.EncodeToString(expectedSum[:])
+	if len(expectedHex) != 64 || !strings.Contains(string(checksumBytes), expectedHex+"  scorecard.json") {
+		t.Fatalf("expected 64-hex SHA-256 digest %q in scorecard.sha256, got %q", expectedHex, string(checksumBytes))
 	}
 
 	// Empty findings SARIF must have "results": [] (not null)
