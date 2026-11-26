@@ -472,6 +472,12 @@ func RunSASTSuiteWithOptions(ctx context.Context, targetDir string, lang types.B
 	}
 	all = append(all, polyFindings...)
 
+	leakFindings, err := ScanStaticResourceLeaks(targetDir, lang)
+	if err != nil {
+		return nil, fmt.Errorf("static resource leak scan failed: %w", err)
+	}
+	all = append(all, leakFindings...)
+
 	return all, nil
 }
 
