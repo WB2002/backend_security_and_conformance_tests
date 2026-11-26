@@ -68,6 +68,12 @@ func LinkSourceToPackageReachability(
 	srcGraph, pkgGraph types.DependencyGraph,
 	findings []types.SecurityFinding,
 ) (types.DependencyGraph, types.DependencyGraph, []types.SecurityFinding) {
+	outFindings := make([]types.SecurityFinding, len(findings))
+	copy(outFindings, findings)
+	if len(pkgGraph.Nodes) == 0 {
+		return srcGraph, pkgGraph, outFindings
+	}
+
 	pkgByName := make(map[string][]string)
 	for _, n := range pkgGraph.Nodes {
 		names := []string{
@@ -164,11 +170,12 @@ func LinkSourceToPackageReachability(
 		pkgNodeByID[n.ID] = n
 	}
 
-	outFindings := make([]types.SecurityFinding, len(findings))
-	copy(outFindings, findings)
 	for i := range outFindings {
 		f := &outFindings[i]
 		if f.Category != types.CategorySCA && !(f.Category == types.CategoryMalware && f.PackageName != "") {
+			continue
+		}
+		if f.Reachable != nil && *f.Reachable {
 			continue
 		}
 		reachable := false
@@ -604,7 +611,7 @@ func AnalyzeArchitectureAndRouteFlows(
 		}
 	}
 
-	requireAuth := arch == nil || arch.RequireAuthOnNonPublic || (!arch.RequireRateLimitOnNonPublic && !arch.RequireValidationOnMutating)
+	requireAuth := arch == nil || arch.RequireAuthOnNonPublic
 	requireRateLimit := arch != nil && arch.RequireRateLimitOnNonPublic
 	requireValidation := arch != nil && arch.RequireValidationOnMutating
 

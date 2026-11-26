@@ -74,6 +74,35 @@ func resolveK6ProfileSpec(profile LoadProfile) k6ProfileSpec {
 	}
 }
 
+func buildAuthChurnLoginGuard(guardVar, loginPath, emailField, passwordField, tokenPath, refreshJSONPath string) string {
+	refreshCapture := ""
+	if refreshJSONPath != "" {
+		refreshCapture = fmt.Sprintf("\n          vuRefreshToken = extractPath(parsedLogin, %q) || vuRefreshToken;", refreshJSONPath)
+	}
+	return fmt.Sprintf(`  if (!%s) {
+    const now = Date.now();
+    if (vuLastLoginMs === 0 || now - vuLastLoginMs >= 15000) {
+      vuLastLoginMs = now;
+      const loginRes = http.post(
+        BASE_URL + %q,
+        JSON.stringify({ %q: data.email, %q: data.password }),
+        {
+          headers: { "Content-Type": "application/json" },
+          responseCallback: http.expectedStatuses({ min: 200, max: 299 }, 429),
+        }
+      );
+      check(loginRes, { "auth churn login 2xx or rate-limited": (r) => (r.status >= 200 && r.status < 300) || r.status === 429 });
+      if (loginRes.status >= 200 && loginRes.status < 300) {
+        try {
+          const parsedLogin = loginRes.json();
+          vuAccessToken = extractPath(parsedLogin, %q) || vuAccessToken;%s
+        } catch (_) {}
+      }
+    }
+  }
+`, guardVar, loginPath, emailField, passwordField, tokenPath, refreshCapture)
+}
+
 func defaultIfEmpty(v, fallback string) string {
 	if strings.TrimSpace(v) == "" {
 		return fallback
@@ -296,32 +325,65 @@ export function crudLifecycle(data) {
 	}
 
 	if hasAuth {
-		refreshBlock := ""
+		refreshJSONPath := defaultIfEmpty(auth.Login.RefreshPath, "refreshToken")
+		var churnBody strings.Builder
 		if refreshPath != "" {
-			refreshBlock = fmt.Sprintf(`  let sessionRefresh = "";
-  try {
-    sessionRefresh = extractPath(loginRes.json(), %q);
-  } catch (_) {
-    sessionRefresh = "";
-  }
-  if (sessionRefresh) {
-    const refreshRes = http.post(BASE_URL + %q, JSON.stringify({ %q: sessionRefresh }), params);
+			churnBody.WriteString(buildAuthChurnLoginGuard("vuRefreshToken", loginPath, loginEmailField, loginPasswordField, tokenPath, refreshJSONPath))
+			churnBody.WriteString(fmt.Sprintf(`  if (vuRefreshToken) {
+    const refreshRes = http.post(BASE_URL + %q, JSON.stringify({ %q: vuRefreshToken }), params);
     check(refreshRes, { "auth churn refresh 2xx": (r) => r.status >= 200 && r.status < 300 });
+    if (refreshRes.status >= 200 && refreshRes.status < 300) {
+      try {
+        const parsedRefresh = refreshRes.json();
+        const nextRefresh = extractPath(parsedRefresh, %q);
+        if (nextRefresh) {
+          vuRefreshToken = nextRefresh;
+        }
+        const nextAccess = extractPath(parsedRefresh, %q);
+        if (nextAccess) {
+          vuAccessToken = nextAccess;
+        }
+      } catch (_) {}
+    } else {
+      vuRefreshToken = "";
+    }
   }
-`, defaultIfEmpty(auth.Login.RefreshPath, "refreshToken"), refreshPath, refreshFieldKey)
+`, refreshPath, refreshFieldKey, refreshJSONPath, tokenPath))
+		} else {
+			churnBody.WriteString(buildAuthChurnLoginGuard("vuAccessToken", loginPath, loginEmailField, loginPasswordField, tokenPath, ""))
+			if mePath != "" {
+				churnBody.WriteString(fmt.Sprintf(`  if (vuAccessToken) {
+    const sessionRes = http.get(BASE_URL + %q, {
+      headers: { Authorization: "Bearer " + vuAccessToken },
+    });
+    check(sessionRes, { "auth churn session 2xx": (r) => r.status >= 200 && r.status < 300 });
+    if (sessionRes.status === 401) {
+      vuAccessToken = "";
+    }
+  }
+`, mePath))
+			}
 		}
 		b.WriteString(fmt.Sprintf(`
+let vuAccessToken = "";
+let vuRefreshToken = "";
+let vuAuthInitialized = false;
+let vuLastLoginMs = 0;
+
 export function authSessionChurn(data) {
   if (!data || !data.email) {
-    sleep(0.2);
+    sleep(1);
     return;
   }
+  if (!vuAuthInitialized) {
+    vuAuthInitialized = true;
+    vuAccessToken = data.token || "";
+    vuRefreshToken = data.refreshToken || "";
+  }
   const params = { headers: { "Content-Type": "application/json" } };
-  const loginRes = http.post(BASE_URL + %q, JSON.stringify({ %q: data.email, %q: data.password }), params);
-  check(loginRes, { "auth churn login 2xx": (r) => r.status >= 200 && r.status < 300 });
-%s  sleep(0.25);
+%s  sleep(1);
 }
-`, loginPath, loginEmailField, loginPasswordField, refreshBlock))
+`, churnBody.String()))
 	}
 
 	if hasWS {

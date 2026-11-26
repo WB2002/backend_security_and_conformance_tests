@@ -2,6 +2,7 @@ package sast_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -679,6 +680,31 @@ func TestRunSASTSuiteWithOptions_PolyglotDispatchAndParseErrors(t *testing.T) {
 		_, err := sast.RunSASTSuiteWithOptions(context.Background(), tmp, types.LangGo, runner.ModeLocal, mockExec)
 		if err == nil {
 			t.Fatalf("expected parse error for malformed gosec JSON, got nil")
+		}
+	})
+
+	t.Run("polyglot tool execution errors are propagated instead of silently swallowed", func(t *testing.T) {
+		tmp := t.TempDir()
+		mockExec := func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+			if cmd.Binary == "gosec" {
+				return runner.ToolExecutionResult{ExitCode: 2, Stderr: "gosec crashed"}, nil
+			}
+			return runner.ToolExecutionResult{ExitCode: 0}, nil
+		}
+		_, err := sast.RunSASTSuiteWithOptions(context.Background(), tmp, types.LangGo, runner.ModeLocal, mockExec)
+		if err == nil {
+			t.Fatalf("expected gosec disallowed exit code error to be propagated, got nil")
+		}
+
+		sobelowErrExec := func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+			if cmd.Binary == "sobelow" {
+				return runner.ToolExecutionResult{}, errors.New("sobelow runtime failure")
+			}
+			return runner.ToolExecutionResult{ExitCode: 0}, nil
+		}
+		_, err = sast.RunSASTSuiteWithOptions(context.Background(), tmp, types.LangElixir, runner.ModeAuto, sobelowErrExec)
+		if err == nil || !strings.Contains(err.Error(), "sobelow") {
+			t.Fatalf("expected sobelow execution error to propagate in ModeAuto, got %v", err)
 		}
 	})
 }

@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -596,10 +598,35 @@ func findYARARuleFiles(targetDir string) []string {
 }
 
 func canInvokeTool(mode runner.ExecutionMode, tool runner.ToolName, execFn runner.CommandExecutor) bool {
+	if mode == runner.ModeDocker && runner.PinnedToolImage(tool) == "" {
+		return false
+	}
 	if execFn != nil {
 		return true
 	}
 	return runner.IsToolAvailable(mode, tool)
+}
+
+func runPolyglotTool(
+	ctx context.Context,
+	opts runner.ToolInvocationOptions,
+	execFn runner.CommandExecutor,
+	parseFn func([]byte, string) ([]types.SecurityFinding, error),
+) ([]types.SecurityFinding, error) {
+	if !canInvokeTool(opts.Mode, opts.Tool, execFn) {
+		return nil, nil
+	}
+	res, err := runner.RunTool(ctx, opts, execFn)
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s execution failed: %w", opts.Tool, err)
+	}
+	if strings.TrimSpace(res.Stdout) == "" {
+		return nil, nil
+	}
+	return parseFn([]byte(res.Stdout), opts.TargetDir)
 }
 
 func runPolyglotScanners(
@@ -614,74 +641,55 @@ func runPolyglotScanners(
 
 	switch lang {
 	case types.LangGo:
-		if canInvokeTool(mode, runner.ToolGosec, execFn) {
-			res, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
-				Tool:             runner.ToolGosec,
-				Args:             []string{"-fmt=json", "-quiet", scanPathFor(runner.ToolGosec) + "/..."},
-				TargetDir:        targetDir,
-				Mode:             mode,
-				AllowedExitCodes: []int{0, 1},
-			}, execFn)
-			if err == nil && strings.TrimSpace(res.Stdout) != "" {
-				f, pErr := ParseGosecOutput([]byte(res.Stdout), targetDir)
-				if pErr != nil {
-					return nil, pErr
-				}
-				all = append(all, f...)
-			}
+		gosecFindings, err := runPolyglotTool(ctx, runner.ToolInvocationOptions{
+			Tool:             runner.ToolGosec,
+			Args:             []string{"-fmt=json", "-quiet", scanPathFor(runner.ToolGosec) + "/..."},
+			TargetDir:        targetDir,
+			Mode:             mode,
+			AllowedExitCodes: []int{0, 1},
+		}, execFn, ParseGosecOutput)
+		if err != nil {
+			return nil, err
 		}
-		if canInvokeTool(mode, runner.ToolGovulncheck, execFn) {
-			res, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
-				Tool:             runner.ToolGovulncheck,
-				Args:             []string{"-json", "-C", scanPathFor(runner.ToolGovulncheck), "./..."},
-				TargetDir:        targetDir,
-				Mode:             mode,
-				AllowedExitCodes: []int{0, 1, 3},
-			}, execFn)
-			if err == nil && strings.TrimSpace(res.Stdout) != "" {
-				f, pErr := ParseGovulncheckOutput([]byte(res.Stdout), targetDir)
-				if pErr != nil {
-					return nil, pErr
-				}
-				all = append(all, f...)
-			}
+		all = append(all, gosecFindings...)
+
+		gvFindings, err := runPolyglotTool(ctx, runner.ToolInvocationOptions{
+			Tool:             runner.ToolGovulncheck,
+			Args:             []string{"-json", "-C", scanPathFor(runner.ToolGovulncheck), "./..."},
+			TargetDir:        targetDir,
+			Mode:             mode,
+			AllowedExitCodes: []int{0, 1, 3},
+		}, execFn, ParseGovulncheckOutput)
+		if err != nil {
+			return nil, err
 		}
+		all = append(all, gvFindings...)
 
 	case types.LangPython:
-		if canInvokeTool(mode, runner.ToolBandit, execFn) {
-			res, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
-				Tool:             runner.ToolBandit,
-				Args:             []string{"-r", "-f", "json", "-q", scanPathFor(runner.ToolBandit)},
-				TargetDir:        targetDir,
-				Mode:             mode,
-				AllowedExitCodes: []int{0, 1},
-			}, execFn)
-			if err == nil && strings.TrimSpace(res.Stdout) != "" {
-				f, pErr := ParseBanditOutput([]byte(res.Stdout), targetDir)
-				if pErr != nil {
-					return nil, pErr
-				}
-				all = append(all, f...)
-			}
+		banditFindings, err := runPolyglotTool(ctx, runner.ToolInvocationOptions{
+			Tool:             runner.ToolBandit,
+			Args:             []string{"-r", "-f", "json", "-q", scanPathFor(runner.ToolBandit)},
+			TargetDir:        targetDir,
+			Mode:             mode,
+			AllowedExitCodes: []int{0, 1},
+		}, execFn, ParseBanditOutput)
+		if err != nil {
+			return nil, err
 		}
+		all = append(all, banditFindings...)
 
 	case types.LangElixir:
-		if canInvokeTool(mode, runner.ToolSobelow, execFn) {
-			res, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
-				Tool:             runner.ToolSobelow,
-				Args:             []string{"--format", "json", "--root", scanPathFor(runner.ToolSobelow)},
-				TargetDir:        targetDir,
-				Mode:             mode,
-				AllowedExitCodes: []int{0, 1},
-			}, execFn)
-			if err == nil && strings.TrimSpace(res.Stdout) != "" {
-				f, pErr := ParseSobelowOutput([]byte(res.Stdout), targetDir)
-				if pErr != nil {
-					return nil, pErr
-				}
-				all = append(all, f...)
-			}
+		sobelowFindings, err := runPolyglotTool(ctx, runner.ToolInvocationOptions{
+			Tool:             runner.ToolSobelow,
+			Args:             []string{"--format", "json", "--root", scanPathFor(runner.ToolSobelow)},
+			TargetDir:        targetDir,
+			Mode:             mode,
+			AllowedExitCodes: []int{0, 1},
+		}, execFn, ParseSobelowOutput)
+		if err != nil {
+			return nil, err
 		}
+		all = append(all, sobelowFindings...)
 
 	case types.LangTypeScript, types.LangJavaScript:
 		tsFindings, err := ScanTypeScriptBoundarySafety(targetDir)
@@ -698,20 +706,17 @@ func runPolyglotScanners(
 			if runner.ResolveEffectiveMode(mode, runner.ToolYARA) == runner.ModeDocker {
 				ruleArg = "/workspace/" + NormalizeRelativePath(ruleFile, targetDir)
 			}
-			res, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
+			yaraFindings, err := runPolyglotTool(ctx, runner.ToolInvocationOptions{
 				Tool:             runner.ToolYARA,
 				Args:             []string{"-r", ruleArg, scanRoot},
 				TargetDir:        targetDir,
 				Mode:             mode,
 				AllowedExitCodes: []int{0, 1},
-			}, execFn)
-			if err == nil && strings.TrimSpace(res.Stdout) != "" {
-				f, pErr := ParseYARAOutput([]byte(res.Stdout), targetDir)
-				if pErr != nil {
-					return nil, pErr
-				}
-				all = append(all, f...)
+			}, execFn, ParseYARAOutput)
+			if err != nil {
+				return nil, err
 			}
+			all = append(all, yaraFindings...)
 		}
 	}
 

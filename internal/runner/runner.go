@@ -62,7 +62,7 @@ var toolRegistry = map[ToolName]toolSpec{
 	ToolGosec:        {LocalBinary: "gosec", DockerImage: "securego/gosec:2.22.0@sha256:5db2c6466767618cb90e43e49b8d82d8cd7bfbf3d9f644a1eab707f273bde7ef", DefaultOffline: true, ReadOnlyRootFS: true},
 	ToolGovulncheck:  {LocalBinary: "govulncheck"},
 	ToolBandit:       {LocalBinary: "bandit", DockerImage: "ghcr.io/pycqa/bandit/bandit@sha256:70c0d5de64db59de9b213348fc2bede3216c55fccb789386efe56440c384b29a", DefaultOffline: true, ReadOnlyRootFS: true},
-	ToolSobelow:      {LocalBinary: "sobelow", DockerImage: "ghcr.io/nccgroup/sobelow:0.13.0@sha256:5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d", DefaultOffline: true, ReadOnlyRootFS: true},
+	ToolSobelow:      {LocalBinary: "sobelow"},
 	ToolYARA:         {LocalBinary: "yara", DockerImage: "blacktop/yara@sha256:10ec7fc0db0df35eeeb8c37163d07df7823c2d19886443f807a1859f5df5fee8", DefaultOffline: true, ReadOnlyRootFS: true},
 }
 

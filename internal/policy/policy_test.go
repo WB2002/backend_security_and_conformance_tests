@@ -162,10 +162,10 @@ func TestApplySecurityWaivers_ValidationAndMatchingTable(t *testing.T) {
 	validExp := "2026-12-31T00:00:00Z"
 
 	tests := []struct {
-		name               string
-		finding            types.SecurityFinding
-		waiver             types.SecurityWaiver
-		wantRetained       bool
+		name                string
+		finding             types.SecurityFinding
+		waiver              types.SecurityWaiver
+		wantRetained        bool
 		wantViolationSubstr string
 	}{
 		{
@@ -370,6 +370,42 @@ func TestEvaluateSecurityPolicy_MemoryBackwardCompatibilityAndSlope(t *testing.T
 	}
 }
 
+func TestEvaluateSecurityPolicy_FailsOnBeamAtomGrowthOver1MiB(t *testing.T) {
+	pol := policy.StrictSecurityPolicy()
+
+	// Within 1 MiB threshold should pass.
+	okCard := types.ConformanceScorecard{
+		MemoryAnalysis: &types.MemoryLeakAnalysis{
+			PostWarmupBaselineBytes: 50 * 1024 * 1024,
+			RetainedDriftPercent:    1.0,
+			SlopeBytesPerReq:        10.0,
+			BeamAtomDeltaBytes:      1024 * 1024,
+			LeakDetected:            false,
+		},
+	}
+	if res := policy.EvaluateSecurityPolicy(okCard, pol); !res.Passed {
+		t.Fatalf("expected BeamAtomDeltaBytes == 1 MiB to pass, got %v", res.Violations)
+	}
+
+	// Exceeding 1 MiB must fail StrictSecurityPolicy even with flat RSS/FDs/goroutines.
+	leakCard := types.ConformanceScorecard{
+		MemoryAnalysis: &types.MemoryLeakAnalysis{
+			PostWarmupBaselineBytes: 50 * 1024 * 1024,
+			RetainedDriftPercent:    0.5,
+			SlopeBytesPerReq:        0.0,
+			BeamAtomDeltaBytes:      2 * 1024 * 1024,
+			LeakDetected:            true,
+		},
+	}
+	res := policy.EvaluateSecurityPolicy(leakCard, pol)
+	if res.Passed {
+		t.Fatalf("expected BEAM atom growth > 1 MiB to fail StrictSecurityPolicy, got Passed=true")
+	}
+	if !slices.ContainsFunc(res.Violations, func(v string) bool { return strings.Contains(strings.ToLower(v), "beam atom") }) {
+		t.Fatalf("expected BEAM atom violation message, got %v", res.Violations)
+	}
+}
+
 func TestManifestExtendedCapabilitiesAndDefaults(t *testing.T) {
 	raw := []byte(`{
 		"name": "go-full-api",
@@ -417,4 +453,3 @@ func TestManifestExtendedCapabilitiesAndDefaults(t *testing.T) {
 		t.Fatalf("unexpected architecture rules: %+v", m.Architecture)
 	}
 }
-

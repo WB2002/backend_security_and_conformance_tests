@@ -55,53 +55,61 @@ var (
 )
 
 var standardPythonBackends = map[string]bool{
-	"setuptools.build_meta":       true,
+	"setuptools.build_meta":            true,
 	"setuptools.build_meta:__legacy__": true,
-	"hatchling.build":             true,
-	"poetry.core.masonry.api":     true,
-	"flit_core.buildapi":          true,
-	"pdm.backend":                 true,
-	"maturin":                     true,
-	"scikit_build_core.build":     true,
-	"mesonpy":                     true,
-	"uv_build":                    true,
+	"hatchling.build":                  true,
+	"poetry.core.masonry.api":          true,
+	"flit_core.buildapi":               true,
+	"pdm.backend":                      true,
+	"maturin":                          true,
+	"scikit_build_core.build":          true,
+	"mesonpy":                          true,
+	"uv_build":                         true,
 }
 
-var curatedTopPackages = []string{
-	// npm
-	"express", "fastify", "lodash", "axios", "prisma", "jsonwebtoken",
-	"react", "next", "typescript", "eslint", "prettier", "zod", "helmet",
-	"mongoose", "sequelize", "typeorm", "nestjs", "dotenv", "chalk",
-	"commander", "webpack", "vite", "jest", "vitest", "mocha", "bcrypt",
-	"bcryptjs", "passport", "socket.io", "winston", "pino", "ioredis",
-	"redis", "mysql2", "nodemon", "supertest", "cors", "body-parser",
-	"cookie-parser", "multer", "uuid", "dayjs", "moment", "rxjs",
-	"graphql", "apollo-server", "esbuild", "rollup", "tailwindcss",
-	// pypi
-	"requests", "fastapi", "pydantic", "sqlalchemy", "django", "flask",
-	"uvicorn", "gunicorn", "celery", "pytest", "numpy", "pandas", "scipy",
-	"httpx", "aiohttp", "alembic", "psycopg2", "pyjwt", "cryptography",
-	"boto3", "click", "typer", "jinja2", "pyyaml", "pillow",
-	"beautifulsoup4", "urllib3", "certifi", "setuptools", "wheel",
-	"starlette", "passlib", "python-dotenv", "python-jose", "structlog",
-	"loguru", "black", "ruff", "mypy",
-	// hex (Elixir)
-	"phoenix", "ecto", "plug", "jason", "swoosh", "oban", "absinthe",
-	"guardian", "tesla", "finch", "bandit", "cowboy", "postgrex",
-	"myxql", "redix", "broadway", "telemetry", "credo", "dialyxir",
-	"ex_doc", "timex", "gettext", "bcrypt_elixir", "argon2_elixir",
-	"joken", "cors_plug",
-	// go
-	"gorm", "sqlx", "gorilla", "zerolog", "logrus", "cobra", "viper",
-	"testify", "protobuf", "fiber", "echo",
+var curatedTopPackagesByEcosystem = map[string][]string{
+	"npm": {
+		"express", "fastify", "lodash", "axios", "prisma", "jsonwebtoken",
+		"react", "next", "typescript", "eslint", "prettier", "zod", "helmet",
+		"mongoose", "sequelize", "typeorm", "nestjs", "dotenv", "chalk",
+		"commander", "webpack", "vite", "jest", "vitest", "mocha", "bcrypt",
+		"bcryptjs", "passport", "socket.io", "winston", "pino", "ioredis",
+		"redis", "mysql2", "nodemon", "supertest", "cors", "body-parser",
+		"cookie-parser", "multer", "uuid", "dayjs", "moment", "rxjs",
+		"graphql", "apollo-server", "esbuild", "rollup", "tailwindcss",
+	},
+	"pypi": {
+		"requests", "fastapi", "pydantic", "sqlalchemy", "django", "flask",
+		"uvicorn", "gunicorn", "celery", "pytest", "numpy", "pandas", "scipy",
+		"httpx", "aiohttp", "alembic", "psycopg2", "pyjwt", "cryptography",
+		"boto3", "click", "typer", "jinja2", "pyyaml", "pillow",
+		"beautifulsoup4", "urllib3", "certifi", "setuptools", "wheel",
+		"starlette", "passlib", "python-dotenv", "python-jose", "structlog",
+		"loguru", "black", "ruff", "mypy",
+	},
+	"hex": {
+		"phoenix", "ecto", "plug", "jason", "swoosh", "oban", "absinthe",
+		"guardian", "tesla", "finch", "bandit", "cowboy", "postgrex",
+		"myxql", "redix", "broadway", "telemetry", "credo", "dialyxir",
+		"ex_doc", "timex", "gettext", "bcrypt_elixir", "argon2_elixir",
+		"joken", "cors_plug",
+	},
+	"go": {
+		"gorm", "sqlx", "gorilla", "zerolog", "logrus", "cobra", "viper",
+		"testify", "protobuf", "fiber", "echo",
+	},
 }
 
-var curatedTopPackagesSet = func() map[string]bool {
-	m := make(map[string]bool, len(curatedTopPackages))
-	for _, p := range curatedTopPackages {
-		m[p] = true
+var curatedTopPackagesSetByEcosystem = func() map[string]map[string]bool {
+	out := make(map[string]map[string]bool, len(curatedTopPackagesByEcosystem))
+	for eco, pkgs := range curatedTopPackagesByEcosystem {
+		set := make(map[string]bool, len(pkgs))
+		for _, p := range pkgs {
+			set[p] = true
+		}
+		out[eco] = set
 	}
-	return m
+	return out
 }()
 
 func buildAllowedRegistrySet(opts ScanOptions) map[string]bool {
@@ -286,6 +294,42 @@ func scanSetupPyHooks(relSlash, fullPath string) []types.SecurityFinding {
 	}}
 }
 
+func stripTOMLInlineComment(line string) string {
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inDouble {
+			if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		if inSingle {
+			if c == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inDouble = true
+		case '\'':
+			inSingle = true
+		case '#':
+			return strings.TrimSpace(line[:i])
+		}
+	}
+	return strings.TrimSpace(line)
+}
+
 func scanPyprojectHooks(relSlash, fullPath string) []types.SecurityFinding {
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
@@ -295,8 +339,8 @@ func scanPyprojectHooks(relSlash, fullPath string) []types.SecurityFinding {
 	inBuildSystem := false
 	lines := strings.Split(string(data), "\n")
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		trimmed := stripTOMLInlineComment(line)
+		if trimmed == "" {
 			continue
 		}
 		lower := strings.ToLower(trimmed)
@@ -1238,21 +1282,21 @@ func scanTyposquattingAndAge(ctx context.Context, targetDir string, opts ScanOpt
 				candidate = candidate[idx+1:]
 			}
 		}
-		if len(candidate) >= 4 && !strings.HasPrefix(candidate, "@") && !curatedTopPackagesSet[candidate] {
+		ecoKnown := curatedTopPackagesByEcosystem[dep.Ecosystem]
+		ecoSet := curatedTopPackagesSetByEcosystem[dep.Ecosystem]
+		if len(ecoKnown) > 0 && len(candidate) >= 4 && !strings.HasPrefix(candidate, "@") && !ecoSet[candidate] {
 			normCand := strings.ReplaceAll(candidate, "-", "_")
-			for _, known := range curatedTopPackages {
-				if len(known) < 4 {
-					continue
-				}
+			for _, known := range ecoKnown {
 				isSwap := normCand == strings.ReplaceAll(known, "-", "_") && candidate != known
-				if isSwap || damerauLevenshtein(candidate, known) == 1 {
+				isEdit1 := len(candidate) >= 5 && len(known) >= 5 && damerauLevenshtein(candidate, known) == 1
+				if isSwap || isEdit1 {
 					findings = append(findings, types.SecurityFinding{
 						ID:          "supplychain-typosquat-suspect",
 						Category:    types.CategorySupplyChain,
 						Tool:        "supplychain",
 						Severity:    types.SeverityHigh,
 						Title:       fmt.Sprintf("Potential typosquatting dependency %q (similar to %q) in %s", dep.Name, known, dep.FilePath),
-						Description: fmt.Sprintf("Direct dependency %q is edit-distance 1 or hyphen/underscore-swapped from popular package %q.", dep.Name, known),
+						Description: fmt.Sprintf("Direct dependency %q (%s) is edit-distance 1 or hyphen/underscore-swapped from popular package %q.", dep.Name, dep.Ecosystem, known),
 						FilePath:    dep.FilePath,
 						PackageName: dep.Name,
 						CWE:         "CWE-829",
@@ -1276,9 +1320,9 @@ func scanTyposquattingAndAge(ctx context.Context, targetDir string, opts ScanOpt
 
 func enrichDepsDevAgesBounded(ctx context.Context, targets []directDep, client *http.Client) []types.SecurityFinding {
 	const (
-		maxWorkers             = 8
-		overallEnrichBudget    = 5 * time.Second
-		maxConsecutiveNetErrs  = 2
+		maxWorkers            = 8
+		overallEnrichBudget   = 5 * time.Second
+		maxConsecutiveNetErrs = 2
 	)
 	if client == nil {
 		client = &http.Client{Timeout: 3 * time.Second}

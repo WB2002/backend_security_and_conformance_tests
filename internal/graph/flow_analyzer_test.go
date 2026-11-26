@@ -310,4 +310,102 @@ func listOrders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func TestLinkSourceToPackageReachability_PreservesGovulncheckAndSkipsEmptyPkgGraph(t *testing.T) {
+	trueVal := true
+	findings := []types.SecurityFinding{
+		{
+			ID:          "govulncheck-1-GO-2025-1234",
+			Category:    types.CategorySCA,
+			Tool:        "govulncheck",
+			Severity:    types.SeverityHigh,
+			PackageName: "example.com/pkg/http",
+			CVE:         "CVE-2025-9999",
+			Reachable:   &trueVal,
+		},
+		{
+			ID:          "trivy-sca-CVE-2025-0001-lodash-1",
+			Category:    types.CategorySCA,
+			Tool:        "trivy",
+			Severity:    types.SeverityMedium,
+			PackageName: "lodash",
+			CVE:         "CVE-2025-0001",
+		},
+	}
 
+	srcGraph := types.DependencyGraph{
+		Nodes: []types.GraphNode{
+			{ID: "main.go", Label: "main.go", Type: "module"},
+		},
+	}
+
+	// Case 1: Empty pkgGraph (e.g. --stages sast,source-graph without graph) must skip reachability assignment.
+	_, _, skipped := graph.LinkSourceToPackageReachability(srcGraph, types.DependencyGraph{}, findings)
+	if skipped[0].Reachable == nil || !*skipped[0].Reachable {
+		t.Fatalf("expected govulncheck Reachable=true preserved when pkgGraph is empty, got nil=%v val=%v", skipped[0].Reachable == nil, skipped[0].Reachable != nil && *skipped[0].Reachable)
+	}
+	if skipped[1].Reachable != nil {
+		t.Fatalf("expected Reachable=nil (unknown) when pkgGraph is empty, got %v", *skipped[1].Reachable)
+	}
+
+	// Case 2: Non-empty pkgGraph where govulncheck already proved call-graph reachability must preserve Reachable=true
+	// even if pkgGraph has no edge from srcGraph to that package.
+	nonEmptyPkg := types.DependencyGraph{
+		Nodes: []types.GraphNode{
+			{ID: "pkg:golang/example.com/pkg@v1.4.1", Label: "example.com/pkg@v1.4.1", Type: "package"},
+			{ID: "pkg:npm/lodash@4.17.15", Label: "lodash@4.17.15", Type: "package"},
+		},
+	}
+	_, _, linked := graph.LinkSourceToPackageReachability(srcGraph, nonEmptyPkg, findings)
+	if linked[0].Reachable == nil || !*linked[0].Reachable {
+		t.Fatalf("expected govulncheck Reachable=true to not be overwritten when pkgGraph has no direct edge, got nil=%v val=%v", linked[0].Reachable == nil, linked[0].Reachable != nil && *linked[0].Reachable)
+	}
+	if linked[1].Reachable == nil || *linked[1].Reachable {
+		t.Fatalf("expected unreached trivy SCA finding to be marked Reachable=false when pkgGraph is populated, got %+v", linked[1].Reachable)
+	}
+}
+
+func TestAnalyzeArchitectureAndRouteFlows_RespectsRequireAuthFalse(t *testing.T) {
+	files := map[string]string{
+		"src/controllers/order.controller.ts": `
+import { prisma } from '../db/prisma';
+import express from 'express';
+const router = express.Router();
+router.post('/orders', async (req, res) => {
+  res.json(await prisma.order.create(req.body));
+});
+export default router;
+`,
+		"src/db/prisma.ts": `export const prisma = { order: { create: async (x: any) => x } };`,
+	}
+
+	srcGraph := graph.BuildSourceGraphFromFiles(files, graph.SourceGraphOptions{
+		Language: types.LangTypeScript,
+	})
+	arch := &types.ArchitectureRules{
+		Layers: []types.LayerDefinition{
+			{Name: "controller", PathPrefixes: []string{"src/controllers/"}},
+			{Name: "db", PathPrefixes: []string{"src/db/"}},
+		},
+		ForbiddenFlows: []types.LayerFlowRule{
+			{From: "controller", To: "db", Reason: "Controllers must call services"},
+		},
+		RequireAuthOnNonPublic:      false,
+		RequireRateLimitOnNonPublic: false,
+		RequireValidationOnMutating: false,
+	}
+
+	analyzedGraph, findings := graph.AnalyzeArchitectureAndRouteFlows("", files, srcGraph, arch, nil)
+	if len(analyzedGraph.LayerViolations) != 1 {
+		t.Fatalf("expected 1 layer violation, got %d", len(analyzedGraph.LayerViolations))
+	}
+	for _, rf := range analyzedGraph.RouteFindings {
+		if rf.Kind == "unprotected-route" {
+			t.Fatalf("did not expect unprotected-route finding when RequireAuthOnNonPublic=false, got %+v", rf)
+		}
+	}
+	for _, f := range findings {
+		if f.Category == types.CategoryArchitecture && len(f.CodeFlows) == 0 && f.Title != "" && len(f.ID) >= 17 && f.ID[:17] == "route-unprotected" {
+			t.Fatalf("did not expect route-unprotected finding when RequireAuthOnNonPublic=false, got %+v", f)
+		}
+	}
+}

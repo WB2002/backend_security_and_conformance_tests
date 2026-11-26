@@ -198,7 +198,6 @@ func TestOfflineStaticScannersDefaultNetworkNone(t *testing.T) {
 		runner.ToolGitleaks,
 		runner.ToolGosec,
 		runner.ToolBandit,
-		runner.ToolSobelow,
 		runner.ToolYARA,
 	}
 	for _, tool := range offlineTools {
@@ -223,26 +222,37 @@ func TestOfflineStaticScannersDefaultNetworkNone(t *testing.T) {
 		}
 	}
 
-	// govulncheck has no official upstream Docker image; ModeAuto resolves to local binary and forced ModeDocker returns a clear error.
-	gvCmd, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
-		Tool:      runner.ToolGovulncheck,
-		Args:      []string{"-json", "./..."},
-		TargetDir: "/Users/pc/my-repo",
-		Mode:      runner.ModeAuto,
-	})
-	if err != nil {
-		t.Fatalf("BuildToolInvocation(govulncheck, ModeAuto) failed: %v", err)
-	}
-	if gvCmd.Binary != "govulncheck" || gvCmd.Mode != runner.ModeLocal {
-		t.Fatalf("expected local govulncheck binary in ModeAuto, got %+v", gvCmd)
-	}
-	if _, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
-		Tool:      runner.ToolGovulncheck,
-		Args:      []string{"-json", "./..."},
-		TargetDir: "/Users/pc/my-repo",
-		Mode:      runner.ModeDocker,
-	}); err == nil {
-		t.Fatalf("expected error when forcing ModeDocker for govulncheck with no Docker image")
+	// govulncheck and sobelow have no official upstream Docker images; ModeAuto resolves to local binary and forced ModeDocker returns a clear error.
+	for _, tc := range []struct {
+		tool   runner.ToolName
+		args   []string
+		binary string
+	}{
+		{tool: runner.ToolGovulncheck, args: []string{"-json", "./..."}, binary: "govulncheck"},
+		{tool: runner.ToolSobelow, args: []string{"--format", "json"}, binary: "sobelow"},
+	} {
+		cmd, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
+			Tool:      tc.tool,
+			Args:      tc.args,
+			TargetDir: "/Users/pc/my-repo",
+			Mode:      runner.ModeAuto,
+		})
+		if err != nil {
+			t.Fatalf("BuildToolInvocation(%s, ModeAuto) failed: %v", tc.tool, err)
+		}
+		if cmd.Binary != tc.binary || cmd.Mode != runner.ModeLocal {
+			t.Fatalf("expected local %s binary in ModeAuto, got %+v", tc.binary, cmd)
+		}
+		if _, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
+			Tool:      tc.tool,
+			Args:      tc.args,
+			TargetDir: "/Users/pc/my-repo",
+			Mode:      runner.ModeDocker,
+		}); err == nil {
+			t.Fatalf("expected error when forcing ModeDocker for %s with no Docker image", tc.tool)
+		}
+		if runner.IsToolAvailable(runner.ModeDocker, tc.tool) {
+			t.Fatalf("expected IsToolAvailable(ModeDocker, %s) to be false", tc.tool)
+		}
 	}
 }
-

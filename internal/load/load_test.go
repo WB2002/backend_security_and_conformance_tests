@@ -406,3 +406,71 @@ func TestCgroupV2LsofAndDiagnosticsSnapshot(t *testing.T) {
 		t.Fatalf("unexpected diagnostics snapshot: %+v", snap)
 	}
 }
+
+func TestGenerateK6Script_AuthSessionChurnAvoidsLoginRateLimitHammering(t *testing.T) {
+	mWithRefresh, err := manifest.ParseAndValidateManifest([]byte(`{
+		"name": "auth-refresh-api",
+		"language": "go",
+		"capabilities": {
+			"health": { "method": "GET", "path": "/healthz" },
+			"auth": {
+				"register": { "method": "POST", "path": "/auth/register" },
+				"login": { "method": "POST", "path": "/auth/login", "tokenPath": "accessToken", "refreshPath": "refreshToken" },
+				"me": { "method": "GET", "path": "/auth/me" },
+				"refresh": { "method": "POST", "path": "/auth/refresh" }
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseAndValidateManifest failed: %v", err)
+	}
+
+	script := load.GenerateK6Script(mWithRefresh, "http://127.0.0.1:3000", load.ProfileBaseline)
+	start := strings.Index(script, "export function authSessionChurn(data)")
+	if start < 0 {
+		t.Fatalf("missing authSessionChurn function in:\n%s", script)
+	}
+	rest := script[start:]
+	if nextFn := strings.Index(rest[1:], "\nexport function "); nextFn > 0 {
+		rest = rest[:nextFn+1]
+	}
+
+	if !strings.Contains(rest, "data.refreshToken") {
+		t.Fatalf("expected authSessionChurn to seed refresh token from setup() data.refreshToken, got:\n%s", rest)
+	}
+	if !strings.Contains(rest, "nextRefresh") {
+		t.Fatalf("expected authSessionChurn to rotate refresh token from /auth/refresh response, got:\n%s", rest)
+	}
+	if !strings.Contains(rest, "if (!vuRefreshToken)") {
+		t.Fatalf("expected /auth/login inside authSessionChurn to be guarded by missing refresh token (!vuRefreshToken), got:\n%s", rest)
+	}
+	if strings.Contains(rest, "sleep(0.25)") {
+		t.Fatalf("expected authSessionChurn not to hammer every 0.25s, got:\n%s", rest)
+	}
+
+	mNoRefresh, err := manifest.ParseAndValidateManifest([]byte(`{
+		"name": "auth-no-refresh-api",
+		"language": "go",
+		"capabilities": {
+			"health": { "method": "GET", "path": "/healthz" },
+			"auth": {
+				"register": { "method": "POST", "path": "/auth/register" },
+				"login": { "method": "POST", "path": "/auth/login", "tokenPath": "accessToken" },
+				"me": { "method": "GET", "path": "/auth/me" }
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseAndValidateManifest failed: %v", err)
+	}
+	noRefreshScript := load.GenerateK6Script(mNoRefresh, "http://127.0.0.1:3000", load.ProfileBaseline)
+	if idx := strings.Index(noRefreshScript, "export function authSessionChurn(data)"); idx >= 0 {
+		body := noRefreshScript[idx:]
+		if nextFn := strings.Index(body[1:], "\nexport function "); nextFn > 0 {
+			body = body[:nextFn+1]
+		}
+		if !strings.Contains(body, "if (!vuAccessToken)") {
+			t.Fatalf("expected authSessionChurn without refresh endpoint to guard /auth/login behind !vuAccessToken, got:\n%s", body)
+		}
+	}
+}
