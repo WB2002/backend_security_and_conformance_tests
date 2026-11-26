@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -262,6 +263,158 @@ func TestApplySecurityWaivers_ValidationAndMatchingTable(t *testing.T) {
 				t.Fatalf("expected 0 violations, got %v", violations)
 			}
 		})
+	}
+}
+
+func TestEvaluateSecurityPolicy_ExtendedGates(t *testing.T) {
+	pol := policy.StrictSecurityPolicy()
+	card := types.ConformanceScorecard{
+		SourceGraph: types.DependencyGraph{
+			LayerViolations: []types.LayerViolation{{ID: "layer-1", FromLayer: "controller", ToLayer: "db", Severity: types.SeverityHigh}},
+			RouteFindings: []types.RouteGuardFinding{
+				{ID: "route-unprotected-1", Kind: "unprotected-route", Method: "POST", Path: "/orders", MissingGuards: []string{"auth"}, Severity: types.SeverityHigh},
+				{ID: "route-shadow-1", Kind: "shadow-route", Method: "DELETE", Path: "/internal/wipe", Severity: types.SeverityHigh},
+			},
+		},
+		MemoryAnalysis: &types.MemoryLeakAnalysis{
+			RetainedDriftPercent: 22.5,
+			SlopeBytesPerReq:     2048,
+			FDDelta:              64,
+			GoroutineDelta:       50,
+			LeakDetected:         true,
+		},
+		EgressViolations: []types.EgressViolation{{RemoteAddr: "198.51.100.99:4444", Process: "sh", Reason: "unexpected outbound connection"}},
+	}
+
+	res := policy.EvaluateSecurityPolicy(card, pol)
+	if res.Passed {
+		t.Fatalf("expected policy failure, got Passed=true")
+	}
+	for _, wantSub := range []string{
+		"layer boundary violation",
+		"unprotected route",
+		"undocumented shadow route",
+		"retained memory drift",
+		"file descriptor growth",
+		"goroutine growth",
+		"unexpected runtime egress",
+	} {
+		if !slices.ContainsFunc(res.Violations, func(v string) bool { return strings.Contains(v, wantSub) }) {
+			t.Errorf("expected violation containing %q in %v", wantSub, res.Violations)
+		}
+	}
+}
+
+func TestLoadPolicyFileClampsEgressViolations(t *testing.T) {
+	tmpDir := t.TempDir()
+	polPath := filepath.Join(tmpDir, "policy.json")
+	polRaw := `{"maxMalwareFindings":3,"maxEgressViolations":10}`
+	if err := os.WriteFile(polPath, []byte(polRaw), 0644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	pol, err := policy.LoadPolicyFile(polPath)
+	if err != nil {
+		t.Fatalf("LoadPolicyFile failed: %v", err)
+	}
+	if pol.MaxMalwareFindings != 0 {
+		t.Fatalf("expected MaxMalwareFindings clamped to 0, got %d", pol.MaxMalwareFindings)
+	}
+	if pol.MaxEgressViolations != 0 {
+		t.Fatalf("expected MaxEgressViolations clamped to 0, got %d", pol.MaxEgressViolations)
+	}
+}
+
+func TestEvaluateSecurityPolicy_MemoryBackwardCompatibilityAndSlope(t *testing.T) {
+	pol := policy.StrictSecurityPolicy()
+
+	// Legacy MemoryLeakAnalysis with PostWarmupBaselineBytes == 0 and LeakDetected == false should NOT fail on DriftPercent alone.
+	cleanLegacy := types.ConformanceScorecard{
+		MemoryAnalysis: &types.MemoryLeakAnalysis{
+			InitialRSSBytes: 100_000_000,
+			FinalRSSBytes:   125_000_000,
+			DriftPercent:    25.0,
+			LeakDetected:    false,
+		},
+	}
+	if res := policy.EvaluateSecurityPolicy(cleanLegacy, pol); !res.Passed {
+		t.Fatalf("expected legacy scorecard with LeakDetected=false to pass, got %v", res.Violations)
+	}
+
+	// Legacy MemoryLeakAnalysis with PostWarmupBaselineBytes == 0 and LeakDetected == true + DriftPercent > MaxMemoryDriftPercent should fail.
+	leakLegacy := types.ConformanceScorecard{
+		MemoryAnalysis: &types.MemoryLeakAnalysis{
+			InitialRSSBytes: 100_000_000,
+			FinalRSSBytes:   130_000_000,
+			DriftPercent:    30.0,
+			LeakDetected:    true,
+		},
+	}
+	if res := policy.EvaluateSecurityPolicy(leakLegacy, pol); res.Passed {
+		t.Fatalf("expected legacy scorecard with LeakDetected=true to fail")
+	}
+
+	// SlopeBytesPerReq exceeding MaxMemorySlopeBytesPerReq should fail even if RetainedDriftPercent is below threshold.
+	slopeCard := types.ConformanceScorecard{
+		MemoryAnalysis: &types.MemoryLeakAnalysis{
+			PostWarmupBaselineBytes: 100_000_000,
+			RetainedDriftPercent:    5.0,
+			SlopeBytesPerReq:        2048.0,
+		},
+	}
+	res := policy.EvaluateSecurityPolicy(slopeCard, pol)
+	if res.Passed {
+		t.Fatalf("expected slope violation to fail policy")
+	}
+	if !slices.ContainsFunc(res.Violations, func(v string) bool { return strings.Contains(v, "memory slope") }) {
+		t.Errorf("expected memory slope violation, got %v", res.Violations)
+	}
+}
+
+func TestManifestExtendedCapabilitiesAndDefaults(t *testing.T) {
+	raw := []byte(`{
+		"name": "go-full-api",
+		"language": "go",
+		"capabilities": {
+			"health": { "path": "/healthz" },
+			"graphql": { "enabled": true },
+			"upload": { "enabled": true, "path": "/api/upload" },
+			"diagnostics": {
+				"enabled": true,
+				"pprofBaseUrl": "/debug/pprof",
+				"runtimeStatsUrl": "/debug/stats",
+				"gcTriggerUrl": "/debug/gc"
+			}
+		},
+		"architecture": {
+			"layers": [
+				{ "name": "controller", "pathPrefixes": ["internal/http/"] },
+				{ "name": "db", "pathPrefixes": ["internal/db/"] }
+			],
+			"forbiddenFlows": [
+				{ "from": "controller", "to": "db", "reason": "must go through service layer" }
+			],
+			"publicRoutes": ["/healthz", "/api/auth/login"],
+			"requireAuthOnNonPublic": true,
+			"requireRateLimitOnNonPublic": true,
+			"requireValidationOnMutating": true
+		}
+	}`)
+
+	m, err := manifest.ParseAndValidateManifest(raw)
+	if err != nil {
+		t.Fatalf("expected valid extended manifest, got error: %v", err)
+	}
+	if m.Capabilities.GraphQL == nil || m.Capabilities.GraphQL.Path != "/graphql" {
+		t.Fatalf("expected default GraphQL.Path=/graphql, got %+v", m.Capabilities.GraphQL)
+	}
+	if m.Capabilities.Upload == nil || m.Capabilities.Upload.FieldName != "file" {
+		t.Fatalf("expected default Upload.FieldName=file, got %+v", m.Capabilities.Upload)
+	}
+	if m.Capabilities.Diagnostics == nil || !m.Capabilities.Diagnostics.Enabled || m.Capabilities.Diagnostics.PprofBaseURL != "/debug/pprof" {
+		t.Fatalf("unexpected diagnostics capability: %+v", m.Capabilities.Diagnostics)
+	}
+	if m.Architecture == nil || len(m.Architecture.Layers) != 2 || len(m.Architecture.ForbiddenFlows) != 1 || !m.Architecture.RequireAuthOnNonPublic {
+		t.Fatalf("unexpected architecture rules: %+v", m.Architecture)
 	}
 }
 

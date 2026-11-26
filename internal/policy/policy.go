@@ -8,15 +8,23 @@ import (
 
 func StrictSecurityPolicy() types.SecurityPolicy {
 	return types.SecurityPolicy{
-		FailOnAnySourceCycle:  true,
-		FailOnAnyPackageCycle: true,
-		MaxCriticalFindings:   0,
-		MaxHighFindings:       0,
-		MaxMalwareFindings:    0,
-		MaxPenTestFailures:    0,
-		RequireLoadTestPass:   true,
-		RequireMemoryOnSoak:   true,
-		MaxMemoryDriftPercent: 20.0,
+		FailOnAnySourceCycle:          true,
+		FailOnAnyPackageCycle:         true,
+		FailOnLayerViolation:          true,
+		FailOnUnprotectedRoute:        true,
+		FailOnShadowRoute:             true,
+		MaxCriticalFindings:           0,
+		MaxHighFindings:               0,
+		MaxMalwareFindings:            0,
+		MaxPenTestFailures:            0,
+		RequireLoadTestPass:           true,
+		RequireMemoryOnSoak:           true,
+		MaxMemoryDriftPercent:         20.0,
+		MaxRetainedMemoryDriftPercent: 15.0,
+		MaxMemorySlopeBytesPerReq:     1024.0,
+		MaxFDGrowth:                   32,
+		MaxGoroutineGrowth:            32,
+		MaxEgressViolations:           0,
 	}
 }
 
@@ -29,6 +37,26 @@ func EvaluateSecurityPolicy(scorecard types.ConformanceScorecard, policy types.S
 
 	if policy.FailOnAnyPackageCycle && len(scorecard.PackageGraph.Cycles) > 0 {
 		violations = append(violations, fmt.Sprintf("detected %d package dependency cycle(s)", len(scorecard.PackageGraph.Cycles)))
+	}
+
+	if policy.FailOnLayerViolation && len(scorecard.SourceGraph.LayerViolations) > 0 {
+		violations = append(violations, fmt.Sprintf("detected %d architecture layer boundary violation(s)", len(scorecard.SourceGraph.LayerViolations)))
+	}
+
+	var unprotectedRoutes, shadowRoutes int
+	for _, rf := range scorecard.SourceGraph.RouteFindings {
+		switch rf.Kind {
+		case "unprotected-route":
+			unprotectedRoutes++
+		case "shadow-route":
+			shadowRoutes++
+		}
+	}
+	if policy.FailOnUnprotectedRoute && unprotectedRoutes > 0 {
+		violations = append(violations, fmt.Sprintf("detected %d unprotected route(s) missing required guards", unprotectedRoutes))
+	}
+	if policy.FailOnShadowRoute && shadowRoutes > 0 {
+		violations = append(violations, fmt.Sprintf("detected %d undocumented shadow route(s)", shadowRoutes))
 	}
 
 	var criticalCount, highCount, malwareCount int
@@ -72,10 +100,25 @@ func EvaluateSecurityPolicy(scorecard types.ConformanceScorecard, policy types.S
 		violations = append(violations, "soak load test requires memory telemetry (--container or --pid) for leak analysis")
 	}
 
-	if scorecard.MemoryAnalysis != nil {
-		if scorecard.MemoryAnalysis.LeakDetected || (policy.MaxMemoryDriftPercent > 0 && scorecard.MemoryAnalysis.DriftPercent > policy.MaxMemoryDriftPercent) {
-			violations = append(violations, fmt.Sprintf("memory leak detected (drift %.2f%% exceeds %.2f%%)", scorecard.MemoryAnalysis.DriftPercent, policy.MaxMemoryDriftPercent))
+	if ma := scorecard.MemoryAnalysis; ma != nil {
+		if policy.MaxRetainedMemoryDriftPercent > 0 && ma.RetainedDriftPercent > policy.MaxRetainedMemoryDriftPercent {
+			violations = append(violations, fmt.Sprintf("retained memory drift %.2f%% exceeds maximum allowed %.2f%%", ma.RetainedDriftPercent, policy.MaxRetainedMemoryDriftPercent))
+		} else if ma.PostWarmupBaselineBytes == 0 && ma.LeakDetected && policy.MaxMemoryDriftPercent > 0 && ma.DriftPercent > policy.MaxMemoryDriftPercent {
+			violations = append(violations, fmt.Sprintf("memory leak detected (drift %.2f%% exceeds %.2f%%)", ma.DriftPercent, policy.MaxMemoryDriftPercent))
 		}
+		if policy.MaxMemorySlopeBytesPerReq > 0 && ma.SlopeBytesPerReq > policy.MaxMemorySlopeBytesPerReq {
+			violations = append(violations, fmt.Sprintf("memory slope %.2f bytes/req exceeds maximum allowed %.2f bytes/req", ma.SlopeBytesPerReq, policy.MaxMemorySlopeBytesPerReq))
+		}
+		if policy.MaxFDGrowth > 0 && ma.FDDelta > policy.MaxFDGrowth {
+			violations = append(violations, fmt.Sprintf("file descriptor growth (%d) exceeds maximum allowed (%d)", ma.FDDelta, policy.MaxFDGrowth))
+		}
+		if policy.MaxGoroutineGrowth > 0 && ma.GoroutineDelta > policy.MaxGoroutineGrowth {
+			violations = append(violations, fmt.Sprintf("goroutine growth (%d) exceeds maximum allowed (%d)", ma.GoroutineDelta, policy.MaxGoroutineGrowth))
+		}
+	}
+
+	if len(scorecard.EgressViolations) > policy.MaxEgressViolations {
+		violations = append(violations, fmt.Sprintf("unexpected runtime egress connections (%d) exceed maximum allowed (%d)", len(scorecard.EgressViolations), policy.MaxEgressViolations))
 	}
 
 	return types.PolicyEvaluationResult{

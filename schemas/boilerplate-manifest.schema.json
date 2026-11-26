@@ -34,7 +34,69 @@
             "path": { "type": "string" },
             "loginBurstCount": { "type": "integer", "minimum": 1, "default": 25 }
           }
+        },
+        "graphql": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "path": { "type": "string", "default": "/graphql" }
+          }
+        },
+        "upload": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "path": { "type": "string" },
+            "fieldName": { "type": "string", "default": "file" }
+          }
+        },
+        "diagnostics": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "pprofBaseUrl": { "type": "string" },
+            "runtimeStatsUrl": { "type": "string" },
+            "gcTriggerUrl": { "type": "string" }
+          }
         }
+      }
+    },
+    "architecture": {
+      "type": "object",
+      "properties": {
+        "layers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "pathPrefixes"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "pathPrefixes": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        },
+        "forbiddenFlows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "to"],
+            "properties": {
+              "from": { "type": "string", "minLength": 1 },
+              "to": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string" }
+            }
+          }
+        },
+        "publicRoutes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "requireAuthOnNonPublic": { "type": "boolean" },
+        "requireRateLimitOnNonPublic": { "type": "boolean" },
+        "requireValidationOnMutating": { "type": "boolean" }
       }
     }
   }

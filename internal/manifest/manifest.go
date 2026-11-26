@@ -83,6 +83,14 @@ func ParseAndValidateManifest(data []byte) (types.BoilerplateManifest, error) {
 		m.Capabilities.RateLimit.LoginBurstCount = 25
 	}
 
+	if m.Capabilities.GraphQL != nil && m.Capabilities.GraphQL.Enabled && strings.TrimSpace(m.Capabilities.GraphQL.Path) == "" {
+		m.Capabilities.GraphQL.Path = "/graphql"
+	}
+
+	if m.Capabilities.Upload != nil && strings.TrimSpace(m.Capabilities.Upload.FieldName) == "" {
+		m.Capabilities.Upload.FieldName = "file"
+	}
+
 	return m, nil
 }
 

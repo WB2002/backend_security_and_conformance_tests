@@ -19,8 +19,9 @@ func LoadPolicyFile(filePath string) (types.SecurityPolicy, error) {
 	if err := json.Unmarshal(raw, &pol); err != nil {
 		return pol, fmt.Errorf("parse policy file %s: %w", filePath, err)
 	}
-	// Malware findings are strictly non-waivable and never permitted by policy.
+	// Malware findings and unexpected runtime egress are strictly non-waivable and never permitted by policy.
 	pol.MaxMalwareFindings = 0
+	pol.MaxEgressViolations = 0
 	return pol, nil
 }
 
