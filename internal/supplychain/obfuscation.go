@@ -12,7 +12,7 @@ import (
 const minSplitEncodedLen = 192
 
 var (
-	reZlibGzipDecompress    = regexp.MustCompile(`(?i)\b(zlib\.(decompress|inflateSync|inflateRawSync|gunzipSync)|gzip\.decompress|:zlib\.(uncompress|gunzip))\s*\(`)
+	reZlibGzipDecompress    = regexp.MustCompile(`(?i)(\b(?:zlib\.(?:decompress|inflateSync|inflateRawSync|gunzipSync)|gzip\.decompress)|:zlib\.(?:uncompress|gunzip))\s*\(`)
 	reFromCharCode          = regexp.MustCompile(`String\.fromCharCode\s*\(([^)]+)\)`)
 	reNumericArg            = regexp.MustCompile(`\b(?:0x[0-9a-fA-F]+|\d+)\b`)
 	reBufferFromEncoded     = regexp.MustCompile(`Buffer\.from\s*\([^\n]*,\s*['"](base64|hex)['"]\s*\)`)
@@ -43,7 +43,7 @@ func ScanMultiLineObfuscationAndDynamicExec(relPath, content string, isTestFile 
 	hasExec := hasExecSink(content)
 
 	// 1. Split / array-joined Base64 or hex payloads (>= 192 cumulative encoded chars)
-	if matchLine, matchKind := findSplitEncodedPayload(content); matchLine > 0 {
+	if matchLine, matchKind := findSplitEncodedPayload(content, isGo); matchLine > 0 {
 		if hasExec {
 			addFinding(types.SecurityFinding{
 				ID:          "malware-obfuscated-exec-dropper",
@@ -192,7 +192,7 @@ type stringLiteralToken struct {
 	line     int
 }
 
-func extractQuotedLiterals(content string) []stringLiteralToken {
+func extractQuotedLiterals(content string, isGo bool) []stringLiteralToken {
 	var tokens []stringLiteralToken
 	n := len(content)
 	line := 1
@@ -230,6 +230,93 @@ func extractQuotedLiterals(content string) []stringLiteralToken {
 		if c == '#' {
 			for i < n && content[i] != '\n' {
 				i++
+			}
+			continue
+		}
+		// Triple-quoted strings: """...""" or '''...'''
+		if (c == '"' || c == '\'') && i+2 < n && content[i+1] == c && content[i+2] == c {
+			q := c
+			startPos := i
+			startLine := line
+			i += 3
+			var buf strings.Builder
+			closed := false
+			for i < n {
+				if content[i] == '\\' && i+1 < n {
+					if content[i+1] == 'x' {
+						buf.WriteByte(content[i])
+						buf.WriteByte(content[i+1])
+						i += 2
+						continue
+					}
+					buf.WriteByte(content[i+1])
+					if content[i+1] == '\n' {
+						line++
+					}
+					i += 2
+					continue
+				}
+				if content[i] == q && i+2 < n && content[i+1] == q && content[i+2] == q {
+					i += 3
+					closed = true
+					break
+				}
+				if content[i] == '\n' {
+					line++
+				}
+				buf.WriteByte(content[i])
+				i++
+			}
+			if closed {
+				tokens = append(tokens, stringLiteralToken{
+					value:    buf.String(),
+					startPos: startPos,
+					endPos:   i,
+					line:     startLine,
+				})
+			}
+			continue
+		}
+		// Backtick template/raw string literal: `...`
+		if c == '`' {
+			startPos := i
+			startLine := line
+			i++
+			var buf strings.Builder
+			closed := false
+			for i < n {
+				if !isGo && content[i] == '\\' && i+1 < n {
+					if content[i+1] == 'x' {
+						buf.WriteByte(content[i])
+						buf.WriteByte(content[i+1])
+						i += 2
+						continue
+					}
+					buf.WriteByte(content[i+1])
+					if content[i+1] == '\n' {
+						line++
+					}
+					i += 2
+					continue
+				}
+				if content[i] == '`' {
+					i++
+					closed = true
+					break
+				}
+				if content[i] == '\n' {
+					line++
+				}
+				buf.WriteByte(content[i])
+				i++
+			}
+			if closed {
+				tokens = append(tokens, stringLiteralToken{
+					value:    buf.String(),
+					startPos: startPos,
+					endPos:   i,
+					line:     startLine,
+				})
 			}
 			continue
 		}
@@ -295,8 +382,8 @@ func isOnlyConcatSeparator(s string) bool {
 	return true
 }
 
-func findSplitEncodedPayload(content string) (int, string) {
-	tokens := extractQuotedLiterals(content)
+func findSplitEncodedPayload(content string, isGo bool) (int, string) {
+	tokens := extractQuotedLiterals(content, isGo)
 	if len(tokens) < 2 {
 		return 0, ""
 	}

