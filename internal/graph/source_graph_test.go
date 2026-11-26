@@ -191,3 +191,158 @@ func TestBuildSourceGraphFromDir_DoesNotSkipDotRootDir(t *testing.T) {
 	}
 }
 
+func TestLoadTSConfigChain_JSONCCommentsTrailingCommasAndCyclicExtends(t *testing.T) {
+	tmp := t.TempDir()
+	mustWrite := func(rel, content string) {
+		full := filepath.Join(tmp, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Base config extends a missing node_modules package and has comments + URL inside string + trailing commas
+	mustWrite("tsconfig.base.json", `{
+  // Inherit from missing package config
+  "extends": "@tsconfig/node20/tsconfig.json",
+  /* Block comment with "quotes" and // line */
+  "compilerOptions": {
+    "baseUrl": "./src",
+    "paths": {
+      "@app/*": ["modules/*"],
+      "@shared/*": ["./src/shared/*",],
+    },
+  },
+}`)
+	mustWrite("tsconfig.json", `{
+  // Local override
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "sourceRoot": "https://example.com/src//not-a-comment",
+    "paths": {
+      "@app/*": ["modules/*"],
+    },
+  },
+}`)
+	mustWrite("src/modules/users/user.service.ts", `export const getUser = () => "ok";`)
+	mustWrite("src/shared/logger.ts", `export const log = (m: string) => m;`)
+	mustWrite("src/controllers/user.controller.ts", `
+import express from 'express';
+import { getUser } from '@app/users/user.service';
+import { log } from 'shared/logger';
+export const handle = () => [express, getUser(), log('hi')];
+`)
+
+	stripped := graph.StripJSONC([]byte(`{"url": "https://a.test//path", /* c */ "k": [1, 2,],}`))
+	if string(stripped) == "" {
+		t.Fatalf("StripJSONC returned empty output")
+	}
+
+	baseURL, paths := graph.LoadTSConfigChain(tmp)
+	if baseURL != "src" {
+		t.Fatalf("expected baseURL 'src', got %q", baseURL)
+	}
+	if len(paths["@app/*"]) == 0 || len(paths["@shared/*"]) == 0 {
+		t.Fatalf("expected inherited and local paths, got %+v", paths)
+	}
+
+	g, err := graph.BuildSourceGraphFromDir(tmp, types.LangTypeScript)
+	if err != nil {
+		t.Fatalf("BuildSourceGraphFromDir failed: %v", err)
+	}
+	if !hasEdge(g.Edges, "src/controllers/user.controller.ts", "src/modules/users/user.service.ts") {
+		t.Fatalf("expected @app/* alias edge, got %+v", g.Edges)
+	}
+	if !hasEdge(g.Edges, "src/controllers/user.controller.ts", "src/shared/logger.ts") {
+		t.Fatalf("expected baseUrl-relative edge to src/shared/logger.ts, got %+v", g.Edges)
+	}
+
+	var foundExpress bool
+	for _, n := range g.Nodes {
+		if n.ID == "src/controllers/user.controller.ts" {
+			for _, ext := range n.ExternalImports {
+				if ext == "express" {
+					foundExpress = true
+				}
+			}
+		}
+	}
+	if !foundExpress {
+		t.Fatalf("expected ExternalImports to include 'express', got nodes %+v", g.Nodes)
+	}
+
+	// Cyclic extends: a.json -> b.json -> a.json must terminate cleanly
+	cycDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(cycDir, "tsconfig.json"), []byte(`{"extends":"./b.json","compilerOptions":{"baseUrl":"./src"}}`), 0o644)
+	_ = os.WriteFile(filepath.Join(cycDir, "b.json"), []byte(`{"extends":"./tsconfig.json","compilerOptions":{"paths":{"@x/*":["x/*"]}}}`), 0o644)
+	cycBase, cycPaths := graph.LoadTSConfigChain(cycDir)
+	if cycBase != "src" || len(cycPaths["@x/*"]) == 0 {
+		t.Fatalf("expected cyclic tsconfig chain to terminate and preserve options, got base=%q paths=%+v", cycBase, cycPaths)
+	}
+}
+
+func TestPythonSrcLayoutAndElixirAliasAs(t *testing.T) {
+	pyG := graph.BuildSourceGraphFromFiles(map[string]string{
+		"src/mypkg/users/service.py": `
+import requests
+from mypkg.users import repo
+`,
+		"src/mypkg/users/repo.py": `
+def fetch():
+    return []
+`,
+	}, graph.SourceGraphOptions{Language: types.LangPython})
+
+	if !hasEdge(pyG.Edges, "src/mypkg/users/service.py", "src/mypkg/users/repo.py") {
+		t.Fatalf("expected Python src/ layout edge to src/mypkg/users/repo.py, got %+v", pyG.Edges)
+	}
+	var foundRequests bool
+	for _, n := range pyG.Nodes {
+		if n.ID == "src/mypkg/users/service.py" {
+			for _, ext := range n.ExternalImports {
+				if ext == "requests" {
+					foundRequests = true
+				}
+			}
+		}
+	}
+	if !foundRequests {
+		t.Fatalf("expected ExternalImports to contain 'requests', got %+v", pyG.Nodes)
+	}
+
+	exG := graph.BuildSourceGraphFromFiles(map[string]string{
+		"lib/my_app/accounts/service.ex": `
+defmodule MyApp.Accounts.Service do
+  use Joken.Config
+  alias MyApp.Accounts.UserRepo, as: Repo
+  def load(id), do: Repo.get(id)
+end
+`,
+		"lib/my_app/accounts/user_repo.ex": `
+defmodule MyApp.Accounts.UserRepo do
+  def get(id), do: id
+end
+`,
+	}, graph.SourceGraphOptions{Language: types.LangElixir})
+
+	if !hasEdge(exG.Edges, "lib/my_app/accounts/service.ex", "lib/my_app/accounts/user_repo.ex") {
+		t.Fatalf("expected Elixir alias-as edge to lib/my_app/accounts/user_repo.ex, got %+v", exG.Edges)
+	}
+	var foundJoken bool
+	for _, n := range exG.Nodes {
+		if n.ID == "lib/my_app/accounts/service.ex" {
+			for _, ext := range n.ExternalImports {
+				if ext == "joken" {
+					foundJoken = true
+				}
+			}
+		}
+	}
+	if !foundJoken {
+		t.Fatalf("expected Elixir ExternalImports to contain 'joken', got %+v", exG.Nodes)
+	}
+}
+
+

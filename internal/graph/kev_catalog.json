@@ -1,0 +1,125 @@
+{
+  "catalogVersion": "2026.11.26",
+  "vulnerabilities": [
+    {
+      "cveID": "CVE-2021-44228",
+      "vendorProject": "Apache",
+      "product": "Log4j2",
+      "vulnerabilityName": "Apache Log4j2 Remote Code Execution Vulnerability (Log4Shell)"
+    },
+    {
+      "cveID": "CVE-2021-45046",
+      "vendorProject": "Apache",
+      "product": "Log4j2",
+      "vulnerabilityName": "Apache Log4j2 Remote Code Execution Vulnerability"
+    },
+    {
+      "cveID": "CVE-2022-22965",
+      "vendorProject": "VMware",
+      "product": "Spring Framework",
+      "vulnerabilityName": "VMware Spring Framework Remote Code Execution Vulnerability (Spring4Shell)"
+    },
+    {
+      "cveID": "CVE-2022-22963",
+      "vendorProject": "VMware",
+      "product": "Spring Cloud Function",
+      "vulnerabilityName": "Spring Cloud Function SpEL Injection Vulnerability"
+    },
+    {
+      "cveID": "CVE-2022-42889",
+      "vendorProject": "Apache",
+      "product": "Commons Text",
+      "vulnerabilityName": "Apache Commons Text Arbitrary Code Execution (Text4Shell)"
+    },
+    {
+      "cveID": "CVE-2023-44487",
+      "vendorProject": "IETF",
+      "product": "HTTP/2",
+      "vulnerabilityName": "HTTP/2 Rapid Reset Attack Vulnerability"
+    },
+    {
+      "cveID": "CVE-2023-38545",
+      "vendorProject": "cURL",
+      "product": "libcurl",
+      "vulnerabilityName": "cURL SOCKS5 Heap Buffer Overflow Vulnerability"
+    },
+    {
+      "cveID": "CVE-2023-46604",
+      "vendorProject": "Apache",
+      "product": "ActiveMQ",
+      "vulnerabilityName": "Apache ActiveMQ Deserialization of Untrusted Data Vulnerability"
+    },
+    {
+      "cveID": "CVE-2023-4966",
+      "vendorProject": "Citrix",
+      "product": "NetScaler",
+      "vulnerabilityName": "Citrix Bleed Buffer Over-read Vulnerability"
+    },
+    {
+      "cveID": "CVE-2024-21626",
+      "vendorProject": "Open Containers Initiative",
+      "product": "runc",
+      "vulnerabilityName": "runc Container Breakout Vulnerability"
+    },
+    {
+      "cveID": "CVE-2024-3094",
+      "vendorProject": "Tukaani",
+      "product": "XZ Utils",
+      "vulnerabilityName": "XZ Utils Supply Chain Backdoor"
+    },
+    {
+      "cveID": "CVE-2024-6387",
+      "vendorProject": "OpenSSH",
+      "product": "OpenSSH",
+      "vulnerabilityName": "OpenSSH Signal Handler Race Condition (regreSSHion)"
+    },
+    {
+      "cveID": "CVE-2024-23897",
+      "vendorProject": "Jenkins",
+      "product": "Jenkins",
+      "vulnerabilityName": "Jenkins Arbitrary File Read Vulnerability"
+    },
+    {
+      "cveID": "CVE-2024-3400",
+      "vendorProject": "Palo Alto Networks",
+      "product": "PAN-OS",
+      "vulnerabilityName": "PAN-OS Command Injection Vulnerability"
+    },
+    {
+      "cveID": "CVE-2024-4577",
+      "vendorProject": "PHP",
+      "product": "PHP",
+      "vulnerabilityName": "PHP CGI Argument Injection Vulnerability"
+    },
+    {
+      "cveID": "CVE-2024-55591",
+      "vendorProject": "Fortinet",
+      "product": "FortiOS",
+      "vulnerabilityName": "Fortinet Authentication Bypass Vulnerability"
+    },
+    {
+      "cveID": "CVE-2025-29927",
+      "vendorProject": "Vercel",
+      "product": "Next.js",
+      "vulnerabilityName": "Next.js Middleware Authorization Bypass Vulnerability"
+    },
+    {
+      "cveID": "CVE-2025-32433",
+      "vendorProject": "Erlang",
+      "product": "OTP SSH",
+      "vulnerabilityName": "Erlang/OTP SSH Pre-Auth Remote Code Execution Vulnerability"
+    },
+    {
+      "cveID": "CVE-2024-29041",
+      "vendorProject": "Express",
+      "product": "express",
+      "vulnerabilityName": "Express.js Open Redirect Vulnerability"
+    },
+    {
+      "cveID": "CVE-2023-45288",
+      "vendorProject": "Go",
+      "product": "net/http",
+      "vulnerabilityName": "Go net/http CONTINUATION Flood Vulnerability"
+    }
+  ]
+}

@@ -3,18 +3,56 @@ package graph
 import (
 	"bufio"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"math"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/runner"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
 )
+
+//go:embed kev_catalog.json
+var embeddedKEVCatalog []byte
+
+var (
+	kevOnce sync.Once
+	kevSet  map[string]bool
+)
+
+func loadKEVCatalog() map[string]bool {
+	kevOnce.Do(func() {
+		kevSet = make(map[string]bool)
+		var doc struct {
+			Vulnerabilities []struct {
+				CVEID string `json:"cveID"`
+			} `json:"vulnerabilities"`
+		}
+		if err := json.Unmarshal(embeddedKEVCatalog, &doc); err == nil {
+			for _, v := range doc.Vulnerabilities {
+				id := strings.ToUpper(strings.TrimSpace(v.CVEID))
+				if id != "" {
+					kevSet[id] = true
+				}
+			}
+		}
+	})
+	return kevSet
+}
+
+func isKnownExploitedCVE(id string) bool {
+	return loadKEVCatalog()[strings.ToUpper(strings.TrimSpace(id))]
+}
 
 type cycloneDXDoc struct {
 	Components []struct {
@@ -29,6 +67,19 @@ type cycloneDXDoc struct {
 	} `json:"dependencies"`
 }
 
+type osvVulnerability struct {
+	ID       string   `json:"id"`
+	Aliases  []string `json:"aliases"`
+	Summary  string   `json:"summary"`
+	Severity []struct {
+		Type  string `json:"type"`
+		Score string `json:"score"`
+	} `json:"severity"`
+	DatabaseSpecific struct {
+		Severity string `json:"severity"`
+	} `json:"database_specific"`
+}
+
 type osvDoc struct {
 	Results []struct {
 		Packages []struct {
@@ -37,15 +88,226 @@ type osvDoc struct {
 				Version   string `json:"version"`
 				Ecosystem string `json:"ecosystem"`
 			} `json:"package"`
-			Vulnerabilities []struct {
-				ID               string `json:"id"`
-				Summary          string `json:"summary"`
-				DatabaseSpecific struct {
-					Severity string `json:"severity"`
-				} `json:"database_specific"`
-			} `json:"vulnerabilities"`
+			Vulnerabilities []osvVulnerability `json:"vulnerabilities"`
 		} `json:"packages"`
 	} `json:"results"`
+}
+
+func buildOSVFinding(pkgName, pkgVersion string, v osvVulnerability) types.SecurityFinding {
+	category := types.CategorySCA
+	var severity types.Severity
+	cvssFound := false
+	for _, sevEntry := range v.Severity {
+		if parsed, ok := ParseCVSSSeverity(sevEntry.Score); ok {
+			if !cvssFound || severityRank(parsed) > severityRank(severity) {
+				severity = parsed
+				cvssFound = true
+			}
+		}
+	}
+	if !cvssFound {
+		severity = mapOSVSeverity(v.DatabaseSpecific.Severity)
+	}
+	isKEV := isKnownExploitedCVE(v.ID)
+	for _, alias := range v.Aliases {
+		if isKnownExploitedCVE(alias) {
+			isKEV = true
+			break
+		}
+	}
+	if isKEV {
+		severity = types.SeverityCritical
+	}
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(v.ID)), "MAL-") {
+		category = types.CategoryMalware
+		severity = types.SeverityCritical
+	}
+	return types.SecurityFinding{
+		ID:          fmt.Sprintf("osv-%s-%s", pkgName, v.ID),
+		Category:    category,
+		Tool:        "osv-scanner",
+		Severity:    severity,
+		Title:       fmt.Sprintf("%s in %s@%s", v.ID, pkgName, pkgVersion),
+		Description: v.Summary,
+		CVE:         v.ID,
+		PackageName: pkgName,
+		KEV:         isKEV,
+	}
+}
+
+func severityRank(s types.Severity) int {
+	switch s {
+	case types.SeverityCritical:
+		return 4
+	case types.SeverityHigh:
+		return 3
+	case types.SeverityMedium:
+		return 2
+	case types.SeverityLow:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func scoreToSeverity(score float64) types.Severity {
+	switch {
+	case score >= 9.0:
+		return types.SeverityCritical
+	case score >= 7.0:
+		return types.SeverityHigh
+	case score >= 4.0:
+		return types.SeverityMedium
+	case score > 0.0:
+		return types.SeverityLow
+	default:
+		return types.SeverityInfo
+	}
+}
+
+func roundUpCVSS(x float64) float64 {
+	intInput := math.Round(x * 100000)
+	if int(intInput)%10000 == 0 {
+		return intInput / 100000.0
+	}
+	return (math.Floor(intInput/10000.0) + 1.0) / 10.0
+}
+
+func computeCVSSv3BaseScore(metrics map[string]string) (float64, bool) {
+	avMap := map[string]float64{"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2}
+	acMap := map[string]float64{"L": 0.77, "H": 0.44}
+	uiMap := map[string]float64{"N": 0.85, "R": 0.62}
+	ciaMap := map[string]float64{"H": 0.56, "L": 0.22, "N": 0.0}
+
+	av, ok1 := avMap[metrics["AV"]]
+	ac, ok2 := acMap[metrics["AC"]]
+	ui, ok3 := uiMap[metrics["UI"]]
+	c, ok4 := ciaMap[metrics["C"]]
+	i, ok5 := ciaMap[metrics["I"]]
+	a, ok6 := ciaMap[metrics["A"]]
+	scope := metrics["S"]
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || (scope != "U" && scope != "C") {
+		return 0, false
+	}
+
+	var pr float64
+	switch metrics["PR"] {
+	case "N":
+		pr = 0.85
+	case "L":
+		if scope == "C" {
+			pr = 0.68
+		} else {
+			pr = 0.62
+		}
+	case "H":
+		if scope == "C" {
+			pr = 0.50
+		} else {
+			pr = 0.27
+		}
+	default:
+		return 0, false
+	}
+
+	iss := 1.0 - ((1.0 - c) * (1.0 - i) * (1.0 - a))
+	var impact float64
+	if scope == "U" {
+		impact = 6.42 * iss
+	} else {
+		impact = 7.52*(iss-0.029) - 3.25*math.Pow(iss-0.02, 15)
+	}
+	if impact <= 0 {
+		return 0.0, true
+	}
+	exploitability := 8.22 * av * ac * pr * ui
+	var base float64
+	if scope == "U" {
+		base = math.Min(impact+exploitability, 10.0)
+	} else {
+		base = math.Min(1.08*(impact+exploitability), 10.0)
+	}
+	return roundUpCVSS(base), true
+}
+
+func computeCVSSv4ApproxScore(metrics map[string]string) (float64, bool) {
+	ciaMap := map[string]float64{"H": 0.56, "L": 0.22, "N": 0.0}
+	vc, ok1 := ciaMap[metrics["VC"]]
+	vi, ok2 := ciaMap[metrics["VI"]]
+	va, ok3 := ciaMap[metrics["VA"]]
+	if !ok1 || !ok2 || !ok3 {
+		return 0, false
+	}
+	sc := ciaMap[metrics["SC"]]
+	si := ciaMap[metrics["SI"]]
+	sa := ciaMap[metrics["SA"]]
+	maxImpact := math.Max(1.0-(1.0-vc)*(1.0-vi)*(1.0-va), 1.0-(1.0-sc)*(1.0-si)*(1.0-sa))
+	if maxImpact <= 0 {
+		return 0.0, true
+	}
+	av := 0.85
+	switch metrics["AV"] {
+	case "A":
+		av = 0.62
+	case "L":
+		av = 0.55
+	case "P":
+		av = 0.20
+	}
+	ac := 0.77
+	if metrics["AC"] == "H" || metrics["AT"] == "P" {
+		ac = 0.44
+	}
+	pr := 0.85
+	switch metrics["PR"] {
+	case "L":
+		pr = 0.62
+	case "H":
+		pr = 0.27
+	}
+	ui := 0.85
+	if metrics["UI"] == "P" || metrics["UI"] == "A" {
+		ui = 0.62
+	}
+	score := math.Min(10.0, 6.42*maxImpact+8.22*av*ac*pr*ui)
+	return roundUpCVSS(score), true
+}
+
+// ParseCVSSSeverity parses a numeric CVSS score (e.g. "7.5") or a CVSS v3.x / v4.0 vector
+// string and returns the mapped Severity.
+func ParseCVSSSeverity(vectorOrScore string) (types.Severity, bool) {
+	raw := strings.TrimSpace(vectorOrScore)
+	if raw == "" {
+		return "", false
+	}
+	if num, err := strconv.ParseFloat(raw, 64); err == nil && num >= 0 && num <= 10 {
+		return scoreToSeverity(num), true
+	}
+
+	upper := strings.ToUpper(raw)
+	if strings.HasPrefix(upper, "CVSS:3.0/") || strings.HasPrefix(upper, "CVSS:3.1/") {
+		metrics := make(map[string]string)
+		for _, part := range strings.Split(upper, "/")[1:] {
+			if kv := strings.SplitN(part, ":", 2); len(kv) == 2 {
+				metrics[kv[0]] = kv[1]
+			}
+		}
+		if score, ok := computeCVSSv3BaseScore(metrics); ok {
+			return scoreToSeverity(score), true
+		}
+	}
+	if strings.HasPrefix(upper, "CVSS:4.0/") {
+		metrics := make(map[string]string)
+		for _, part := range strings.Split(upper, "/")[1:] {
+			if kv := strings.SplitN(part, ":", 2); len(kv) == 2 {
+				metrics[kv[0]] = kv[1]
+			}
+		}
+		if score, ok := computeCVSSv4ApproxScore(metrics); ok {
+			return scoreToSeverity(score), true
+		}
+	}
+	return "", false
 }
 
 func mapOSVSeverity(raw string) types.Severity {
@@ -59,7 +321,7 @@ func mapOSVSeverity(raw string) types.Severity {
 	case "LOW":
 		return types.SeverityLow
 	default:
-		return types.SeverityHigh
+		return types.SeverityMedium
 	}
 }
 
@@ -145,29 +407,14 @@ func ParseCycloneDXSBOMGraph(cdxJSON []byte, osvJSON []byte) (types.DependencyGr
 					ref = nameVerToRef[pkg.Package.Name]
 				}
 				for _, v := range pkg.Vulnerabilities {
-					fID := fmt.Sprintf("osv-%s-%s", pkg.Package.Name, v.ID)
-					category := types.CategorySCA
-					severity := mapOSVSeverity(v.DatabaseSpecific.Severity)
-					if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(v.ID)), "MAL-") {
-						category = types.CategoryMalware
-						severity = types.SeverityCritical
-					}
-					findings = append(findings, types.SecurityFinding{
-						ID:          fID,
-						Category:    category,
-						Tool:        "osv-scanner",
-						Severity:    severity,
-						Title:       fmt.Sprintf("%s in %s@%s", v.ID, pkg.Package.Name, pkg.Package.Version),
-						Description: v.Summary,
-						CVE:         v.ID,
-						PackageName: pkg.Package.Name,
-					})
+					finding := buildOSVFinding(pkg.Package.Name, pkg.Package.Version, v)
+					findings = append(findings, finding)
 					if node, exists := nodeMap[ref]; exists {
 						if !slices.Contains(node.CVEs, v.ID) {
 							node.CVEs = append(node.CVEs, v.ID)
 						}
-						if !slices.Contains(node.Findings, fID) {
-							node.Findings = append(node.Findings, fID)
+						if !slices.Contains(node.Findings, finding.ID) {
+							node.Findings = append(node.Findings, finding.ID)
 						}
 					}
 				}
@@ -248,6 +495,57 @@ func RunSBOMAndOSVScan(ctx context.Context, targetDir string, mode runner.Execut
 	}
 
 	return g, findings, nil
+}
+
+var epssBaseURL = "https://api.first.org/data/v1/epss"
+
+// EnrichFindingsWithEPSS optionally queries the FIRST EPSS API (3s timeout) when
+// onlineEnrich is true, populating EPSS scores on CVE findings and degrading cleanly offline.
+func EnrichFindingsWithEPSS(ctx context.Context, findings []types.SecurityFinding, onlineEnrich bool) []types.SecurityFinding {
+	out := make([]types.SecurityFinding, len(findings))
+	copy(out, findings)
+	if !onlineEnrich {
+		return out
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	cache := make(map[string]float64)
+
+	for i := range out {
+		cve := strings.ToUpper(strings.TrimSpace(out[i].CVE))
+		if !strings.HasPrefix(cve, "CVE-") {
+			continue
+		}
+		if score, cached := cache[cve]; cached {
+			out[i].EPSS = score
+			continue
+		}
+		reqURL := epssBaseURL + "?cve=" + url.QueryEscape(cve)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		var payload struct {
+			Data []struct {
+				CVE  string `json:"cve"`
+				EPSS string `json:"epss"`
+			} `json:"data"`
+		}
+		if resp.StatusCode == http.StatusOK {
+			if err := json.NewDecoder(resp.Body).Decode(&payload); err == nil && len(payload.Data) > 0 {
+				if val, parseErr := strconv.ParseFloat(strings.TrimSpace(payload.Data[0].EPSS), 64); parseErr == nil {
+					cache[cve] = val
+					out[i].EPSS = val
+				}
+			}
+		}
+		resp.Body.Close()
+	}
+	return out
 }
 
 // parseNPMPurl extracts (packageName, version) from a CycloneDX npm PURL such as

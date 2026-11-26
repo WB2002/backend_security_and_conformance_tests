@@ -118,6 +118,43 @@ func sarifLevel(sev types.Severity) string {
 	}
 }
 
+func buildSARIFCodeFlows(flows [][]types.CodeFlowStep, fallbackURI string) []map[string]any {
+	codeFlows := make([]map[string]any, 0, len(flows))
+	for _, flow := range flows {
+		tfLocations := make([]map[string]any, 0, len(flow))
+		for _, step := range flow {
+			stepLine := step.Line
+			if stepLine <= 0 {
+				stepLine = 1
+			}
+			region := map[string]any{"startLine": stepLine}
+			if step.Column > 0 {
+				region["startColumn"] = step.Column
+			}
+			stepURI := step.FilePath
+			if stepURI == "" {
+				stepURI = fallbackURI
+			}
+			locObj := map[string]any{
+				"physicalLocation": map[string]any{
+					"artifactLocation": map[string]any{"uri": stepURI},
+					"region":           region,
+				},
+			}
+			if step.Message != "" {
+				locObj["message"] = map[string]any{"text": step.Message}
+			}
+			tfLocations = append(tfLocations, map[string]any{"location": locObj})
+		}
+		codeFlows = append(codeFlows, map[string]any{
+			"threadFlows": []map[string]any{
+				{"locations": tfLocations},
+			},
+		})
+	}
+	return codeFlows
+}
+
 func GenerateSARIFReport(card types.ConformanceScorecard) ([]byte, error) {
 	results := make([]map[string]any, 0)
 	for _, f := range card.Findings {
@@ -132,7 +169,7 @@ func GenerateSARIFReport(card types.ConformanceScorecard) ([]byte, error) {
 		if line <= 0 {
 			line = 1
 		}
-		results = append(results, map[string]any{
+		resObj := map[string]any{
 			"ruleId": f.ID,
 			"level":  sarifLevel(f.Severity),
 			"message": map[string]any{
@@ -146,7 +183,11 @@ func GenerateSARIFReport(card types.ConformanceScorecard) ([]byte, error) {
 					},
 				},
 			},
-		})
+		}
+		if len(f.CodeFlows) > 0 {
+			resObj["codeFlows"] = buildSARIFCodeFlows(f.CodeFlows, loc)
+		}
+		results = append(results, resObj)
 	}
 
 	for _, c := range append(append([]types.CycleFinding{}, card.SourceGraph.Cycles...), card.PackageGraph.Cycles...) {
@@ -314,7 +355,7 @@ func GenerateHTMLDashboard(card types.ConformanceScorecard, policyRes types.Poli
 	b.WriteString("</tbody></table>\n")
 
 	b.WriteString("<h2>Security Findings (SAST, Secrets, IaC, SCA, DAST)</h2>\n")
-	b.WriteString("<table><thead><tr><th>ID</th><th>Tool</th><th>Category</th><th>Severity</th><th>Title</th><th>Location</th></tr></thead><tbody>\n")
+	b.WriteString("<table><thead><tr><th>ID</th><th>Tool</th><th>Category</th><th>Severity</th><th>Intel</th><th>Title</th><th>Location</th></tr></thead><tbody>\n")
 	for _, f := range card.Findings {
 		loc := f.FilePath
 		if f.Line > 0 {
@@ -322,16 +363,69 @@ func GenerateHTMLDashboard(card types.ConformanceScorecard, policyRes types.Poli
 		} else if loc == "" {
 			loc = f.Endpoint
 		}
-		b.WriteString(fmt.Sprintf("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
+		var intelBadges []string
+		if f.KEV {
+			intelBadges = append(intelBadges, `<span class="badge toxic">KEV</span>`)
+		}
+		if f.Reachable != nil {
+			if *f.Reachable {
+				intelBadges = append(intelBadges, `<span class="badge fail">Reachable</span>`)
+			} else {
+				intelBadges = append(intelBadges, `<span class="badge pass">Unreachable</span>`)
+			}
+		}
+		if f.EPSS > 0 {
+			intelBadges = append(intelBadges, fmt.Sprintf(`<span class="badge">EPSS %.1f%%</span>`, f.EPSS*100))
+		}
+		b.WriteString(fmt.Sprintf("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
 			html.EscapeString(f.ID),
 			html.EscapeString(f.Tool),
 			html.EscapeString(string(f.Category)),
 			html.EscapeString(string(f.Severity)),
+			strings.Join(intelBadges, " "),
 			html.EscapeString(f.Title),
 			html.EscapeString(loc),
 		))
 	}
 	b.WriteString("</tbody></table>\n")
+
+	if len(card.SourceGraph.LayerViolations) > 0 {
+		b.WriteString("<h2>Architectural Layer Violations</h2>\n")
+		b.WriteString("<table><thead><tr><th>ID</th><th>From</th><th>To</th><th>Severity</th><th>Reason</th></tr></thead><tbody>\n")
+		for _, lv := range card.SourceGraph.LayerViolations {
+			b.WriteString(fmt.Sprintf("<tr><td>%s</td><td>%s (%s)</td><td>%s (%s)</td><td>%s</td><td>%s</td></tr>\n",
+				html.EscapeString(lv.ID),
+				html.EscapeString(lv.FromFile),
+				html.EscapeString(lv.FromLayer),
+				html.EscapeString(lv.ToFile),
+				html.EscapeString(lv.ToLayer),
+				html.EscapeString(string(lv.Severity)),
+				html.EscapeString(lv.Reason),
+			))
+		}
+		b.WriteString("</tbody></table>\n")
+	}
+
+	if len(card.SourceGraph.RouteFindings) > 0 {
+		b.WriteString("<h2>Route Guard &amp; Shadow Route Findings</h2>\n")
+		b.WriteString("<table><thead><tr><th>ID</th><th>Kind</th><th>Endpoint</th><th>Missing Guards</th><th>Severity</th><th>Location</th></tr></thead><tbody>\n")
+		for _, rf := range card.SourceGraph.RouteFindings {
+			loc := rf.FilePath
+			if rf.Line > 0 {
+				loc = fmt.Sprintf("%s:%d", rf.FilePath, rf.Line)
+			}
+			b.WriteString(fmt.Sprintf("<tr><td>%s</td><td>%s</td><td>%s %s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
+				html.EscapeString(rf.ID),
+				html.EscapeString(rf.Kind),
+				html.EscapeString(rf.Method),
+				html.EscapeString(rf.Path),
+				html.EscapeString(strings.Join(rf.MissingGuards, ", ")),
+				html.EscapeString(string(rf.Severity)),
+				html.EscapeString(loc),
+			))
+		}
+		b.WriteString("</tbody></table>\n")
+	}
 
 	b.WriteString("<h2>Automated Pen-Test Checks</h2>\n")
 	b.WriteString("<table><thead><tr><th>ID</th><th>Check</th><th>Status</th><th>Severity</th><th>Details</th></tr></thead><tbody>\n")

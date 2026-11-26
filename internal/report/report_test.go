@@ -129,3 +129,81 @@ func TestReportBundleGeneration(t *testing.T) {
 	}
 }
 
+func TestReportSARIFCodeFlowsAndDashboardEnrichments(t *testing.T) {
+	reachableTrue := true
+	card := types.ConformanceScorecard{
+		TargetName: "payments-api",
+		Language:   types.LangTypeScript,
+		Findings: []types.SecurityFinding{
+			{
+				ID:          "osv-body-parser-CVE-2021-44228",
+				Category:    types.CategorySCA,
+				Tool:        "osv-scanner",
+				Severity:    types.SeverityCritical,
+				Title:       "CVE-2021-44228 in body-parser@1.20.0",
+				CVE:         "CVE-2021-44228",
+				PackageName: "body-parser",
+				Reachable:   &reachableTrue,
+				KEV:         true,
+				EPSS:        0.975,
+			},
+			{
+				ID:       "route-sink-1",
+				Category: types.CategoryArchitecture,
+				Tool:     "route-flow-analyzer",
+				Severity: types.SeverityHigh,
+				Title:    "Unvalidated route reaches db sink",
+				FilePath: "src/controllers/order.controller.ts",
+				Line:     5,
+				CodeFlows: [][]types.CodeFlowStep{
+					{
+						{FilePath: "src/controllers/order.controller.ts", Line: 5, Message: "POST /orders entry", Kind: "source"},
+						{FilePath: "src/db/prisma.ts", Line: 1, Message: "Reaches db sink", Kind: "sink"},
+					},
+				},
+			},
+		},
+		SourceGraph: types.DependencyGraph{
+			LayerViolations: []types.LayerViolation{
+				{
+					ID:        "layer-violation-1",
+					FromFile:  "src/controllers/order.controller.ts",
+					ToFile:    "src/db/prisma.ts",
+					FromLayer: "controller",
+					ToLayer:   "db",
+					Reason:    "No direct DB access from controller",
+					Severity:  types.SeverityHigh,
+				},
+			},
+			RouteFindings: []types.RouteGuardFinding{
+				{
+					ID:            "route-guard-1",
+					Method:        "POST",
+					Path:          "/orders",
+					FilePath:      "src/controllers/order.controller.ts",
+					Line:          5,
+					Kind:          "unprotected-route",
+					MissingGuards: []string{"auth"},
+					Severity:      types.SeverityHigh,
+				},
+			},
+		},
+	}
+
+	sarifBytes, err := report.GenerateSARIFReport(card)
+	if err != nil {
+		t.Fatalf("GenerateSARIFReport failed: %v", err)
+	}
+	if !strings.Contains(string(sarifBytes), `"codeFlows"`) || !strings.Contains(string(sarifBytes), `"threadFlows"`) {
+		t.Fatalf("expected SARIF codeFlows and threadFlows, got:\n%s", string(sarifBytes))
+	}
+
+	htmlStr := report.GenerateHTMLDashboard(card, policy.EvaluateSecurityPolicy(card, policy.StrictSecurityPolicy()))
+	for _, want := range []string{"KEV", "Reachable", "Layer Violations", "controller", "Route Guard", "unprotected-route", "/orders"} {
+		if !strings.Contains(htmlStr, want) {
+			t.Fatalf("expected dashboard HTML to contain %q", want)
+		}
+	}
+}
+
+

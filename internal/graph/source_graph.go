@@ -20,6 +20,7 @@ import (
 type SourceGraphOptions struct {
 	Language      types.BoilerplateLanguage
 	GoModuleName  string
+	TSBaseURL     string
 	TSPathAliases map[string][]string
 }
 
@@ -35,8 +36,50 @@ var (
 	pyImportRe        = regexp.MustCompile(`(?m)^\s*import[ \t]+([A-Za-z0-9_., \t]+)`)
 	exDefmoduleRe     = regexp.MustCompile(`(?m)^\s*defmodule\s+([A-Z][A-Za-z0-9_.]*)\s+do\b`)
 	exMultiDirective  = regexp.MustCompile(`(?m)^\s*(?:alias|import|require|use)\s+([A-Z][A-Za-z0-9_.]*)\.\{([^}]+)\}`)
+	exAliasAsRe       = regexp.MustCompile(`(?m)^\s*alias\s+([A-Z][A-Za-z0-9_.]*)\s*,\s*as:\s*([A-Z][A-Za-z0-9_]*)`)
 	exSingleDirective = regexp.MustCompile(`(?m)^\s*(?:alias|import|require|use)\s+([A-Z][A-Za-z0-9_.]*)(?:\s|$|,|#|:)`)
 	exRemoteCallRe    = regexp.MustCompile(`\b([A-Z][A-Za-z0-9_.]*)\.[a-z_][A-Za-z0-9_?!]*\s*\(`)
+)
+
+var (
+	nodeBuiltinMods = map[string]bool{
+		"assert": true, "buffer": true, "child_process": true, "cluster": true, "console": true,
+		"crypto": true, "dgram": true, "dns": true, "events": true, "fs": true, "http": true,
+		"http2": true, "https": true, "module": true, "net": true, "os": true, "path": true,
+		"perf_hooks": true, "process": true, "querystring": true, "readline": true, "stream": true,
+		"string_decoder": true, "timers": true, "tls": true, "tty": true, "url": true, "util": true,
+		"v8": true, "vm": true, "worker_threads": true, "zlib": true,
+	}
+	pyStdlibMods = map[string]bool{
+		"__future__": true, "abc": true, "argparse": true, "array": true, "asyncio": true,
+		"base64": true, "bisect": true, "builtins": true, "collections": true, "concurrent": true,
+		"configparser": true, "contextlib": true, "copy": true, "csv": true, "ctypes": true,
+		"dataclasses": true, "datetime": true, "decimal": true, "difflib": true, "email": true,
+		"enum": true, "errno": true, "fnmatch": true, "fractions": true, "functools": true,
+		"glob": true, "gzip": true, "hashlib": true, "heapq": true, "hmac": true, "html": true,
+		"http": true, "importlib": true, "inspect": true, "io": true, "itertools": true,
+		"json": true, "logging": true, "marshal": true, "math": true, "multiprocessing": true,
+		"operator": true, "os": true, "pathlib": true, "pickle": true, "pkgutil": true,
+		"platform": true, "pprint": true, "queue": true, "random": true, "re": true, "runpy": true,
+		"secrets": true, "select": true, "selectors": true, "shelve": true, "shutil": true,
+		"signal": true, "site": true, "socket": true, "sqlite3": true, "ssl": true, "statistics": true,
+		"string": true, "struct": true, "subprocess": true, "sys": true, "sysconfig": true,
+		"tarfile": true, "tempfile": true, "textwrap": true, "threading": true, "time": true,
+		"traceback": true, "types": true, "typing": true, "unittest": true, "urllib": true,
+		"uuid": true, "warnings": true, "weakref": true, "webbrowser": true, "xml": true, "zipfile": true,
+	}
+	elixirStdlibMods = map[string]bool{
+		"Access": true, "Agent": true, "Application": true, "Atom": true, "Base": true,
+		"Behaviour": true, "Bitwise": true, "Calendar": true, "Code": true, "Collectable": true,
+		"Date": true, "DateTime": true, "DynamicSupervisor": true, "Enum": true, "Enumerable": true,
+		"Exception": true, "ExUnit": true, "File": true, "Float": true, "GenServer": true,
+		"IO": true, "Inspect": true, "Integer": true, "Kernel": true, "Keyword": true,
+		"List": true, "Logger": true, "Macro": true, "Map": true, "MapSet": true, "Mix": true,
+		"Module": true, "NaiveDateTime": true, "Node": true, "OptionParser": true, "Path": true,
+		"Port": true, "Process": true, "Protocol": true, "Range": true, "Record": true,
+		"Regex": true, "Registry": true, "Stream": true, "String": true, "Supervisor": true,
+		"System": true, "Task": true, "Time": true, "Tuple": true, "URI": true, "Version": true,
+	}
 )
 
 func DetectSinkCategories(filePath string, content string) []string {
@@ -103,15 +146,38 @@ func BuildSourceGraphFromFiles(files map[string]string, opts SourceGraphOptions)
 		}
 	}
 
+	extImports := make(map[string]map[string]bool)
+	addExternal := func(from, pkg string) {
+		pkg = strings.TrimSpace(pkg)
+		if from == "" || pkg == "" {
+			return
+		}
+		if extImports[from] == nil {
+			extImports[from] = make(map[string]bool)
+		}
+		extImports[from][pkg] = true
+	}
+
 	switch opts.Language {
 	case types.LangTypeScript, types.LangJavaScript:
-		buildTSGraph(normFiles, sortedPaths, opts.TSPathAliases, addEdge)
+		buildTSGraph(normFiles, sortedPaths, opts.TSBaseURL, opts.TSPathAliases, addEdge, addExternal)
 	case types.LangGo:
-		buildGoGraph(normFiles, sortedPaths, opts.GoModuleName, addEdge)
+		buildGoGraph(normFiles, sortedPaths, opts.GoModuleName, addEdge, addExternal)
 	case types.LangPython:
-		buildPythonGraph(normFiles, sortedPaths, addEdge)
+		buildPythonGraph(normFiles, sortedPaths, addEdge, addExternal)
 	case types.LangElixir:
-		buildElixirGraph(normFiles, sortedPaths, addEdge)
+		buildElixirGraph(normFiles, sortedPaths, addEdge, addExternal)
+	}
+
+	for i := range nodes {
+		if exts := extImports[nodes[i].ID]; len(exts) > 0 {
+			list := make([]string, 0, len(exts))
+			for p := range exts {
+				list = append(list, p)
+			}
+			sort.Strings(list)
+			nodes[i].ExternalImports = list
+		}
 	}
 
 	edges := make([]types.GraphEdge, 0, len(edgeSet))
@@ -131,15 +197,24 @@ func BuildSourceGraphFromFiles(files map[string]string, opts SourceGraphOptions)
 	}
 }
 
-func resolveTSSpecifier(fromFile, spec string, files map[string]string, aliases map[string][]string) string {
+func resolveTSSpecifier(fromFile, spec string, files map[string]string, baseURL string, aliases map[string][]string) string {
 	var candidates []string
+	cleanBase := strings.TrimPrefix(path.Clean(baseURL), "./")
+	if cleanBase == "." {
+		cleanBase = ""
+	}
+
 	for pattern, replacements := range aliases {
 		prefix := strings.TrimSuffix(pattern, "*")
 		if strings.HasPrefix(spec, prefix) {
 			rest := strings.TrimPrefix(spec, prefix)
 			for _, repl := range replacements {
 				replPrefix := strings.TrimSuffix(repl, "*")
-				candidates = append(candidates, path.Clean(replPrefix+rest))
+				direct := strings.TrimPrefix(path.Clean(replPrefix+rest), "./")
+				candidates = append(candidates, direct)
+				if cleanBase != "" && !strings.HasPrefix(direct, cleanBase+"/") && direct != cleanBase {
+					candidates = append(candidates, path.Clean(path.Join(cleanBase, direct)))
+				}
 			}
 		}
 	}
@@ -147,6 +222,8 @@ func resolveTSSpecifier(fromFile, spec string, files map[string]string, aliases 
 	if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") {
 		dir := path.Dir(fromFile)
 		candidates = append(candidates, path.Clean(path.Join(dir, spec)))
+	} else if cleanBase != "" {
+		candidates = append(candidates, path.Clean(path.Join(cleanBase, spec)))
 	}
 
 	tsExts := []string{".ts", ".tsx", ".js", ".mjs", ".cjs"}
@@ -180,7 +257,33 @@ func resolveTSSpecifier(fromFile, spec string, files map[string]string, aliases 
 	return ""
 }
 
-func buildTSGraph(files map[string]string, sortedPaths []string, aliases map[string][]string, addEdge func(from, to, kind string)) {
+func normalizeNPMPackageName(spec string) string {
+	s := strings.TrimSpace(spec)
+	if s == "" || strings.HasPrefix(s, ".") || strings.HasPrefix(s, "/") || strings.HasPrefix(s, "node:") {
+		return ""
+	}
+	if strings.HasPrefix(s, "@") {
+		parts := strings.SplitN(s, "/", 3)
+		if len(parts) >= 2 {
+			return parts[0] + "/" + parts[1]
+		}
+		return ""
+	}
+	pkg := strings.SplitN(s, "/", 2)[0]
+	if nodeBuiltinMods[pkg] {
+		return ""
+	}
+	return pkg
+}
+
+func buildTSGraph(
+	files map[string]string,
+	sortedPaths []string,
+	baseURL string,
+	aliases map[string][]string,
+	addEdge func(from, to, kind string),
+	addExternal func(from, pkg string),
+) {
 	for _, filePath := range sortedPaths {
 		src := blockCommentRe.ReplaceAllString(files[filePath], "")
 		src = lineCommentRe.ReplaceAllString(src, "")
@@ -192,14 +295,22 @@ func buildTSGraph(files map[string]string, sortedPaths []string, aliases map[str
 			specs = append(specs, m[1])
 		}
 		for _, s := range specs {
-			if target := resolveTSSpecifier(filePath, s, files, aliases); target != "" {
+			if target := resolveTSSpecifier(filePath, s, files, baseURL, aliases); target != "" {
 				addEdge(filePath, target, "import")
+			} else if pkg := normalizeNPMPackageName(s); pkg != "" {
+				addExternal(filePath, pkg)
 			}
 		}
 	}
 }
 
-func buildGoGraph(files map[string]string, sortedPaths []string, goModule string, addEdge func(from, to, kind string)) {
+func buildGoGraph(
+	files map[string]string,
+	sortedPaths []string,
+	goModule string,
+	addEdge func(from, to, kind string),
+	addExternal func(from, pkg string),
+) {
 	pkgToFiles := make(map[string][]string)
 	for _, p := range sortedPaths {
 		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
@@ -237,6 +348,10 @@ func buildGoGraph(files map[string]string, sortedPaths []string, goModule string
 			} else if modPrefix != "" && impPath == modPrefix {
 				relPkg = ""
 			} else {
+				firstSeg := strings.SplitN(impPath, "/", 2)[0]
+				if strings.Contains(firstSeg, ".") {
+					addExternal(p, impPath)
+				}
 				continue
 			}
 			if relPkg == fromDir {
@@ -254,17 +369,28 @@ func resolvePyModule(basePath string, files map[string]string) string {
 	if clean == "." || clean == "" {
 		return ""
 	}
-	if _, ok := files[clean+".py"]; ok {
-		return clean + ".py"
+	candidates := []string{clean}
+	if !strings.HasPrefix(clean, "src/") {
+		candidates = append(candidates, path.Join("src", clean))
 	}
-	initFile := path.Join(clean, "__init__.py")
-	if _, ok := files[initFile]; ok {
-		return initFile
+	for _, c := range candidates {
+		if _, ok := files[c+".py"]; ok {
+			return c + ".py"
+		}
+		initFile := path.Join(c, "__init__.py")
+		if _, ok := files[initFile]; ok {
+			return initFile
+		}
 	}
 	return ""
 }
 
-func buildPythonGraph(files map[string]string, sortedPaths []string, addEdge func(from, to, kind string)) {
+func buildPythonGraph(
+	files map[string]string,
+	sortedPaths []string,
+	addEdge func(from, to, kind string),
+	addExternal func(from, pkg string),
+) {
 	for _, filePath := range sortedPaths {
 		if !strings.HasSuffix(filePath, ".py") {
 			continue
@@ -276,8 +402,9 @@ func buildPythonGraph(files map[string]string, sortedPaths []string, addEdge fun
 		for _, m := range fromMatches {
 			modSpec := strings.TrimSpace(m[1])
 			namesPart := strings.TrimSpace(m[2])
+			isRelative := strings.HasPrefix(modSpec, ".")
 			var baseDir string
-			if strings.HasPrefix(modSpec, ".") {
+			if isRelative {
 				dots := 0
 				for dots < len(modSpec) && modSpec[dots] == '.' {
 					dots++
@@ -292,16 +419,25 @@ func buildPythonGraph(files map[string]string, sortedPaths []string, addEdge fun
 				baseDir = strings.ReplaceAll(modSpec, ".", "/")
 			}
 
+			resolvedAny := false
 			for _, rawSym := range strings.Split(namesPart, ",") {
 				sym := strings.TrimSpace(strings.Split(strings.TrimSpace(rawSym), " ")[0])
 				if sym != "" && sym != "*" {
 					if target := resolvePyModule(path.Join(baseDir, sym), files); target != "" {
 						addEdge(filePath, target, "import")
+						resolvedAny = true
 						continue
 					}
 				}
 				if target := resolvePyModule(baseDir, files); target != "" {
 					addEdge(filePath, target, "import")
+					resolvedAny = true
+				}
+			}
+			if !resolvedAny && !isRelative {
+				topPkg := strings.SplitN(modSpec, ".", 2)[0]
+				if topPkg != "" && !pyStdlibMods[topPkg] {
+					addExternal(filePath, topPkg)
 				}
 			}
 		}
@@ -314,13 +450,59 @@ func buildPythonGraph(files map[string]string, sortedPaths []string, addEdge fun
 				}
 				if target := resolvePyModule(strings.ReplaceAll(modName, ".", "/"), files); target != "" {
 					addEdge(filePath, target, "import")
+				} else {
+					topPkg := strings.SplitN(modName, ".", 2)[0]
+					if topPkg != "" && !pyStdlibMods[topPkg] {
+						addExternal(filePath, topPkg)
+					}
 				}
 			}
 		}
 	}
 }
 
-func buildElixirGraph(files map[string]string, sortedPaths []string, addEdge func(from, to, kind string)) {
+func camelToSnake(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				b.WriteByte('_')
+			}
+			b.WriteRune(r + ('a' - 'A'))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func elixirExternalPkg(modName string) string {
+	root := strings.SplitN(strings.TrimSpace(modName), ".", 2)[0]
+	if root == "" || elixirStdlibMods[root] {
+		return ""
+	}
+	return camelToSnake(root)
+}
+
+func expandElixirAlias(modName string, aliases map[string]string) string {
+	if target, ok := aliases[modName]; ok {
+		return target
+	}
+	if dot := strings.Index(modName, "."); dot > 0 {
+		head := modName[:dot]
+		if target, ok := aliases[head]; ok {
+			return target + modName[dot:]
+		}
+	}
+	return modName
+}
+
+func buildElixirGraph(
+	files map[string]string,
+	sortedPaths []string,
+	addEdge func(from, to, kind string),
+	addExternal func(from, pkg string),
+) {
 	modToFile := make(map[string]string)
 	for _, filePath := range sortedPaths {
 		if !strings.HasSuffix(filePath, ".ex") && !strings.HasSuffix(filePath, ".exs") {
@@ -337,6 +519,15 @@ func buildElixirGraph(files map[string]string, sortedPaths []string, addEdge fun
 			continue
 		}
 		src := hashCommentRe.ReplaceAllString(files[filePath], "")
+		fileAliases := make(map[string]string)
+
+		for _, m := range exAliasAsRe.FindAllStringSubmatch(src, -1) {
+			fullMod := strings.TrimSpace(m[1])
+			shortName := strings.TrimSpace(m[2])
+			if fullMod != "" && shortName != "" {
+				fileAliases[shortName] = fullMod
+			}
+		}
 
 		for _, m := range exMultiDirective.FindAllStringSubmatch(src, -1) {
 			prefix := strings.TrimSpace(m[1])
@@ -346,26 +537,228 @@ func buildElixirGraph(files map[string]string, sortedPaths []string, addEdge fun
 					continue
 				}
 				fullMod := prefix + "." + sub
+				parts := strings.Split(fullMod, ".")
+				fileAliases[parts[len(parts)-1]] = fullMod
 				if target, ok := modToFile[fullMod]; ok {
 					addEdge(filePath, target, "import")
+				} else if pkg := elixirExternalPkg(fullMod); pkg != "" {
+					addExternal(filePath, pkg)
 				}
 			}
 		}
 
 		for _, m := range exSingleDirective.FindAllStringSubmatch(src, -1) {
 			modName := strings.TrimSpace(m[1])
+			parts := strings.Split(modName, ".")
+			if len(parts) > 1 {
+				if _, already := fileAliases[parts[len(parts)-1]]; !already {
+					fileAliases[parts[len(parts)-1]] = modName
+				}
+			}
 			if target, ok := modToFile[modName]; ok {
 				addEdge(filePath, target, "import")
+			} else if pkg := elixirExternalPkg(modName); pkg != "" {
+				addExternal(filePath, pkg)
 			}
 		}
 
 		for _, m := range exRemoteCallRe.FindAllStringSubmatch(src, -1) {
-			modName := strings.TrimSpace(m[1])
+			rawMod := strings.TrimSpace(m[1])
+			modName := expandElixirAlias(rawMod, fileAliases)
 			if target, ok := modToFile[modName]; ok {
 				addEdge(filePath, target, "import")
+			} else if pkg := elixirExternalPkg(modName); pkg != "" {
+				addExternal(filePath, pkg)
 			}
 		}
 	}
+}
+
+// StripJSONC strips // line comments, /* */ block comments, and trailing commas before
+// } or ] strictly outside JSON string literals.
+func StripJSONC(raw []byte) []byte {
+	noComments := make([]byte, 0, len(raw))
+	inString := false
+	escaped := false
+
+	for i := 0; i < len(raw); i++ {
+		ch := raw[i]
+		if inString {
+			noComments = append(noComments, ch)
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			noComments = append(noComments, ch)
+			continue
+		}
+		if ch == '/' && i+1 < len(raw) && raw[i+1] == '/' {
+			i += 2
+			for i < len(raw) && raw[i] != '\n' {
+				i++
+			}
+			if i < len(raw) {
+				noComments = append(noComments, '\n')
+			}
+			continue
+		}
+		if ch == '/' && i+1 < len(raw) && raw[i+1] == '*' {
+			i += 2
+			for i+1 < len(raw) && !(raw[i] == '*' && raw[i+1] == '/') {
+				if raw[i] == '\n' {
+					noComments = append(noComments, '\n')
+				}
+				i++
+			}
+			i++ // skip '/'
+			continue
+		}
+		noComments = append(noComments, ch)
+	}
+
+	out := make([]byte, 0, len(noComments))
+	inString = false
+	escaped = false
+	for i := 0; i < len(noComments); i++ {
+		ch := noComments[i]
+		if inString {
+			out = append(out, ch)
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			out = append(out, ch)
+			continue
+		}
+		if ch == ',' {
+			j := i + 1
+			for j < len(noComments) && (noComments[j] == ' ' || noComments[j] == '\t' || noComments[j] == '\r' || noComments[j] == '\n') {
+				j++
+			}
+			if j < len(noComments) && (noComments[j] == '}' || noComments[j] == ']') {
+				continue
+			}
+		}
+		out = append(out, ch)
+	}
+	return out
+}
+
+func loadTSConfigFile(targetDir, cfgPath string, visited map[string]bool) (string, map[string][]string) {
+	absPath, err := filepath.Abs(cfgPath)
+	if err != nil {
+		absPath = filepath.Clean(cfgPath)
+	}
+	if visited[absPath] {
+		return "", nil
+	}
+	visited[absPath] = true
+
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return "", nil
+	}
+
+	var parsed struct {
+		Extends         json.RawMessage `json:"extends"`
+		CompilerOptions struct {
+			BaseURL string              `json:"baseUrl"`
+			Paths   map[string][]string `json:"paths"`
+		} `json:"compilerOptions"`
+	}
+	if err := json.Unmarshal(StripJSONC(b), &parsed); err != nil {
+		return "", nil
+	}
+
+	var extendsList []string
+	if len(parsed.Extends) > 0 {
+		var single string
+		if err := json.Unmarshal(parsed.Extends, &single); err == nil && single != "" {
+			extendsList = []string{single}
+		} else {
+			_ = json.Unmarshal(parsed.Extends, &extendsList)
+		}
+	}
+
+	mergedBase := ""
+	mergedPaths := make(map[string][]string)
+	for _, ext := range extendsList {
+		ext = strings.TrimSpace(ext)
+		if ext == "" {
+			continue
+		}
+		var parentPath string
+		if strings.HasPrefix(ext, "./") || strings.HasPrefix(ext, "../") {
+			parentPath = filepath.Join(filepath.Dir(cfgPath), ext)
+		} else {
+			// Ignore missing node_modules base configs without dropping local options
+			cand := filepath.Join(targetDir, "node_modules", ext)
+			if _, statErr := os.Stat(cand); statErr == nil {
+				parentPath = cand
+			} else if _, statErr := os.Stat(cand + ".json"); statErr == nil {
+				parentPath = cand + ".json"
+			} else {
+				continue
+			}
+		}
+		if info, statErr := os.Stat(parentPath); statErr != nil {
+			if _, jsonErr := os.Stat(parentPath + ".json"); jsonErr == nil {
+				parentPath = parentPath + ".json"
+			} else {
+				continue
+			}
+		} else if info.IsDir() {
+			parentPath = filepath.Join(parentPath, "tsconfig.json")
+		}
+		pBase, pPaths := loadTSConfigFile(targetDir, parentPath, visited)
+		if pBase != "" {
+			mergedBase = pBase
+		}
+		for k, v := range pPaths {
+			mergedPaths[k] = append([]string{}, v...)
+		}
+	}
+
+	if parsed.CompilerOptions.BaseURL != "" {
+		relDir, relErr := filepath.Rel(targetDir, filepath.Dir(cfgPath))
+		if relErr != nil {
+			relDir = "."
+		}
+		joined := path.Clean(path.Join(filepath.ToSlash(relDir), parsed.CompilerOptions.BaseURL))
+		joined = strings.TrimPrefix(joined, "./")
+		if joined == "." {
+			joined = ""
+		}
+		mergedBase = joined
+	}
+	for k, v := range parsed.CompilerOptions.Paths {
+		mergedPaths[k] = append([]string{}, v...)
+	}
+
+	if len(mergedPaths) == 0 {
+		mergedPaths = nil
+	}
+	return mergedBase, mergedPaths
+}
+
+// LoadTSConfigChain loads tsconfig.json from targetDir using JSONC stripping, follows
+// relative extends chains with cycle detection, and ignores missing node_modules bases.
+func LoadTSConfigChain(targetDir string) (baseURL string, paths map[string][]string) {
+	return loadTSConfigFile(targetDir, filepath.Join(targetDir, "tsconfig.json"), make(map[string]bool))
 }
 
 func parseGoModName(targetDir string) string {
@@ -380,22 +773,6 @@ func parseGoModName(targetDir string) string {
 		}
 	}
 	return ""
-}
-
-func parseTSConfigPaths(targetDir string) map[string][]string {
-	b, err := os.ReadFile(filepath.Join(targetDir, "tsconfig.json"))
-	if err != nil {
-		return nil
-	}
-	var parsed struct {
-		CompilerOptions struct {
-			Paths map[string][]string `json:"paths"`
-		} `json:"compilerOptions"`
-	}
-	if err := json.Unmarshal(b, &parsed); err != nil {
-		return nil
-	}
-	return parsed.CompilerOptions.Paths
 }
 
 func shouldIncludeSourceFile(relPath string, lang types.BoilerplateLanguage) bool {
@@ -462,9 +839,11 @@ func BuildSourceGraphFromDir(targetDir string, lang types.BoilerplateLanguage) (
 		return types.DependencyGraph{}, err
 	}
 
+	tsBaseURL, tsPaths := LoadTSConfigChain(targetDir)
 	return BuildSourceGraphFromFiles(files, SourceGraphOptions{
 		Language:      lang,
 		GoModuleName:  parseGoModName(targetDir),
-		TSPathAliases: parseTSConfigPaths(targetDir),
+		TSBaseURL:     tsBaseURL,
+		TSPathAliases: tsPaths,
 	}), nil
 }

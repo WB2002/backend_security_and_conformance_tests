@@ -231,3 +231,63 @@ func TestParseCycloneDXSBOMGraphUpgradesOSVMalwareToCriticalMalwareCategory(t *t
 	}
 }
 
+func TestParseCycloneDXSBOMGraph_DefaultMediumSeverityCVSSv4AndKEVAlias(t *testing.T) {
+	if sev, ok := graph.ParseCVSSSeverity("9.8"); !ok || sev != types.SeverityCritical {
+		t.Fatalf("expected numeric 9.8 -> critical, got sev=%q ok=%v", sev, ok)
+	}
+	if sev, ok := graph.ParseCVSSSeverity("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"); !ok || sev != types.SeverityCritical {
+		t.Fatalf("expected CVSS 4.0 high-impact vector -> critical, got sev=%q ok=%v", sev, ok)
+	}
+
+	cdx := []byte(`{
+  "components": [
+    { "bom-ref": "pkg:npm/unknown-sev@1.0.0", "name": "unknown-sev", "version": "1.0.0" },
+    { "bom-ref": "pkg:npm/next@14.2.0", "name": "next", "version": "14.2.0" }
+  ],
+  "dependencies": []
+}`)
+	osv := []byte(`{
+  "results": [
+    {
+      "packages": [
+        {
+          "package": { "name": "unknown-sev", "version": "1.0.0", "ecosystem": "npm" },
+          "vulnerabilities": [
+            {
+              "id": "GHSA-aaaa-bbbb-cccc",
+              "summary": "Advisory without CVSS or severity"
+            }
+          ]
+        },
+        {
+          "package": { "name": "next", "version": "14.2.0", "ecosystem": "npm" },
+          "vulnerabilities": [
+            {
+              "id": "GHSA-f82v-jwr5-mffw",
+              "aliases": ["CVE-2025-29927"],
+              "summary": "Next.js middleware bypass",
+              "database_specific": { "severity": "HIGH" }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}`)
+
+	_, findings, err := graph.ParseCycloneDXSBOMGraph(cdx, osv)
+	if err != nil {
+		t.Fatalf("ParseCycloneDXSBOMGraph failed: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings, got %d", len(findings))
+	}
+	if findings[0].Severity != types.SeverityMedium {
+		t.Fatalf("expected unknown severity without CVSS to default to SeverityMedium, got %q", findings[0].Severity)
+	}
+	if !findings[1].KEV || findings[1].Severity != types.SeverityCritical {
+		t.Fatalf("expected KEV alias CVE-2025-29927 to escalate to SeverityCritical with KEV=true, got %+v", findings[1])
+	}
+}
+
+
