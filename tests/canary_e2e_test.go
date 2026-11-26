@@ -3,12 +3,17 @@ package tests_test
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,10 +28,12 @@ import (
 	"time"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/graph"
+	"github.com/pc/backend-boilerplate-conformance-tests/internal/load"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/manifest"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/pentest"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/policy"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/report"
+	"github.com/pc/backend-boilerplate-conformance-tests/internal/sast"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/supplychain"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
 )
@@ -193,6 +200,60 @@ func Helper() string {
   }
 }
 `)
+		// Architecture violation (controller -> db directly), unprotected + shadow route, and unclosed HTTP response leak
+		writeFixtureFile(t, repoDir, "internal/db/store.go", `package db
+
+import "database/sql"
+
+func SaveOrder(d *sql.DB, id string) error {
+	_, err := d.Exec("INSERT INTO orders VALUES ($1)", id)
+	return err
+}
+`)
+		writeFixtureFile(t, repoDir, "internal/controllers/orders.go", `package controllers
+
+import (
+	"net/http"
+
+	"example.com/poisoned-target/internal/db"
+)
+
+func Register(mux *http.ServeMux) {
+	mux.HandleFunc("POST /orders", func(w http.ResponseWriter, r *http.Request) {
+		_ = db.SaveOrder(nil, "1")
+		w.WriteHeader(http.StatusCreated)
+	})
+	mux.HandleFunc("DELETE /debug/drop", func(w http.ResponseWriter, r *http.Request) {
+		_ = db.SaveOrder(nil, "drop")
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+`)
+		writeFixtureFile(t, repoDir, "internal/leaky/client.go", `package leaky
+
+import "net/http"
+
+func FetchExternal(u string) error {
+	resp, err := http.Get(u)
+	if err != nil {
+		return err
+	}
+	_ = resp.StatusCode
+	return nil
+}
+`)
+
+		rsaPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("generate RSA key: %v", err)
+		}
+		pubDER, err := x509.MarshalPKIXPublicKey(&rsaPriv.PublicKey)
+		if err != nil {
+			t.Fatalf("marshal PKIX key: %v", err)
+		}
+		jwksPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
+		jwksN := base64.RawURLEncoding.EncodeToString(rsaPriv.PublicKey.N.Bytes())
+		jwksE := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(rsaPriv.PublicKey.E)).Bytes())
 
 		canary, err := pentest.StartSSRFCanaryServer(0)
 		if err != nil {
@@ -230,6 +291,13 @@ func Helper() string {
 			case r.URL.Path == "/health":
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`{"ok":true}`))
+			case r.URL.Path == "/.well-known/jwks.json":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"keys": []map[string]any{
+						{"kty": "RSA", "kid": "vuln-rsa-1", "alg": "RS256", "use": "sig", "n": jwksN, "e": jwksE},
+					},
+				})
 			case r.URL.Path == "/.env":
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte("DATABASE_URL=postgres://admin:supersecret@db:5432/prod\n"))
@@ -279,15 +347,32 @@ func Helper() string {
 				})
 			case r.URL.Path == "/auth/me":
 				tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-				hdr, claims, _, ok := decodeJWTParts(tok)
+				hdr, claims, parts, ok := decodeJWTParts(tok)
 				if !ok {
 					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
 				alg, _ := hdr["alg"].(string)
 				sub, _ := claims["sub"].(string)
-				// Vulnerable: accepts alg:none, HS256 empty-secret, and unverified signatures
-				if alg != "none" && alg != "HS256" {
+				// Vulnerable: accepts alg:none AND HS256 signed with the RSA public key PEM from JWKS (key confusion)
+				switch alg {
+				case "none":
+				case "HS256":
+					sigBytes, decErr := base64.RawURLEncoding.DecodeString(parts[2])
+					if decErr != nil {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					matchesKey := func(k []byte) bool {
+						mac := hmac.New(sha256.New, k)
+						_, _ = mac.Write([]byte(parts[0] + "." + parts[1]))
+						return hmac.Equal(sigBytes, mac.Sum(nil))
+					}
+					if !matchesKey([]byte("prod-signing-secret")) && !matchesKey(jwksPEM) {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+				default:
 					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
@@ -358,6 +443,17 @@ func Helper() string {
 				"ssrfTest": { "enabled": true, "method": "POST", "path": "/webhook", "urlField": "url" },
 				"websockets": { "enabled": true, "path": "/ws" },
 				"rateLimit": { "enabled": true, "path": "/auth/login", "loginBurstCount": 8 }
+			},
+			"architecture": {
+				"layers": [
+					{ "name": "controller", "pathPrefixes": ["internal/controllers/"] },
+					{ "name": "db", "pathPrefixes": ["internal/db/"] }
+				],
+				"forbiddenFlows": [
+					{ "from": "controller", "to": "db", "reason": "Controllers must not call DB directly" }
+				],
+				"publicRoutes": ["/health"],
+				"requireAuthOnNonPublic": true
 			}
 		}`))
 		if err != nil {
@@ -368,25 +464,68 @@ func Helper() string {
 		if err != nil {
 			t.Fatalf("supplychain scan error: %v", err)
 		}
+		leakFindings, err := sast.ScanStaticResourceLeaks(repoDir, types.LangGo)
+		if err != nil {
+			t.Fatalf("static leak scan error: %v", err)
+		}
+		allFindings := append(append([]types.SecurityFinding{}, scFindings...), leakFindings...)
+
 		srcGraph, err := graph.BuildSourceGraphFromDir(repoDir, types.LangGo)
 		if err != nil {
 			t.Fatalf("source graph error: %v", err)
 		}
-		analyzedSrc, analyzedPkg := graph.AnalyzeDependencyGraphs(srcGraph, types.DependencyGraph{}, scFindings)
+		analyzedSrc, analyzedPkg := graph.AnalyzeDependencyGraphs(srcGraph, types.DependencyGraph{}, allFindings)
+
+		ctrlSrc, _ := os.ReadFile(filepath.Join(repoDir, "internal/controllers/orders.go"))
+		dbSrc, _ := os.ReadFile(filepath.Join(repoDir, "internal/db/store.go"))
+		archGraph, archFindings := graph.AnalyzeArchitectureAndRouteFlows(
+			repoDir,
+			map[string]string{
+				"internal/controllers/orders.go": string(ctrlSrc),
+				"internal/db/store.go":           string(dbSrc),
+			},
+			analyzedSrc,
+			m.Architecture,
+			[]byte(`{"openapi":"3.0.0","paths":{"/health":{"get":{}},"/orders":{"post":{}}}}`),
+		)
+		analyzedSrc = archGraph
+		allFindings = append(allFindings, archFindings...)
 
 		ptResults, err := pentest.RunAutomatedPenTestSuite(context.Background(), vulnSrv.URL, m, canary.Port())
 		if err != nil {
 			t.Fatalf("pentest suite error: %v", err)
 		}
 
+		const mib = 1024 * 1024
+		baseTs := int64(1_700_000_000_000)
+		sawtoothMiBs := []int64{50, 50, 50, 55, 60, 58, 64, 70, 67, 75, 82, 79, 79, 79, 79}
+		var sawSamples []types.MemorySample
+		for i, mb := range sawtoothMiBs {
+			sawSamples = append(sawSamples, types.MemorySample{
+				TimestampMs: baseTs + int64(i)*1000,
+				RSSBytes:    mb * mib,
+			})
+		}
+		memLeak := load.AnalyzeMemoryPhases(sawSamples, nil, nil, load.MemoryAnalyzeOptions{
+			WarmupDuration:          2 * time.Second,
+			CooldownDuration:        3 * time.Second,
+			TotalRequests:           1000,
+			MaxRetainedDriftPercent: 15.0,
+			MaxSlopeBytesPerReq:     1024.0,
+		})
+		if !memLeak.LeakDetected || memLeak.SlopeR2 <= 0.90 {
+			t.Fatalf("expected 3-phase sawtooth memory leak detected with SlopeR2 > 0.90, got %+v", memLeak)
+		}
+
 		card := types.ConformanceScorecard{
 			TargetName:     m.Name,
 			Language:       m.Language,
 			Timestamp:      time.Now().UTC().Format(time.RFC3339),
-			Findings:       scFindings,
+			Findings:       allFindings,
 			SourceGraph:    analyzedSrc,
 			PackageGraph:   analyzedPkg,
 			PenTestResults: ptResults,
+			MemoryAnalysis: &memLeak,
 		}
 		polRes := policy.EvaluateSecurityPolicy(card, policy.StrictSecurityPolicy())
 		if polRes.Passed {
@@ -395,7 +534,7 @@ func Helper() string {
 
 		var hasMalware, hasSupplyChain bool
 		var findingIDs []string
-		for _, f := range scFindings {
+		for _, f := range allFindings {
 			findingIDs = append(findingIDs, f.ID)
 			if f.Category == types.CategoryMalware {
 				hasMalware = true
@@ -405,13 +544,14 @@ func Helper() string {
 			}
 		}
 		if !hasMalware || !hasSupplyChain {
-			t.Fatalf("expected both CategoryMalware and CategorySupplyChain findings, got %+v", scFindings)
+			t.Fatalf("expected both CategoryMalware and CategorySupplyChain findings, got %+v", allFindings)
 		}
 		for _, wantID := range []string{
 			"malware-trojan-source-unicode",
 			"malware-obfuscated-exec-dropper",
 			"supplychain-malicious-lifecycle-hook",
 			"supplychain-lockfile-integrity",
+			"leak-go-unclosed-resp-body",
 		} {
 			if !slices.Contains(findingIDs, wantID) {
 				t.Fatalf("expected finding ID %q in %v", wantID, findingIDs)
@@ -421,11 +561,22 @@ func Helper() string {
 		if len(card.SourceGraph.Cycles) == 0 || !slices.ContainsFunc(card.SourceGraph.Cycles, func(c types.CycleFinding) bool { return c.IsToxic }) {
 			t.Fatalf("expected at least one toxic cycle in SourceGraph.Cycles, got %+v", card.SourceGraph.Cycles)
 		}
+		if len(card.SourceGraph.LayerViolations) == 0 {
+			t.Fatalf("expected at least one architecture LayerViolation, got none")
+		}
+		if !slices.ContainsFunc(card.SourceGraph.RouteFindings, func(rf types.RouteGuardFinding) bool { return rf.Kind == "unprotected-route" }) ||
+			!slices.ContainsFunc(card.SourceGraph.RouteFindings, func(rf types.RouteGuardFinding) bool { return rf.Kind == "shadow-route" }) {
+			t.Fatalf("expected both unprotected-route and shadow-route findings, got %+v", card.SourceGraph.RouteFindings)
+		}
 
 		var failedChecks []string
+		var jwtConfusionDetails string
 		for _, pt := range ptResults {
 			if pt.Status == "failed" {
 				failedChecks = append(failedChecks, pt.ID)
+				if pt.ID == "jwt-alg-confusion-and-claims" {
+					jwtConfusionDetails = pt.Details
+				}
 			}
 		}
 		if len(failedChecks) < 12 {
@@ -449,11 +600,18 @@ func Helper() string {
 				t.Fatalf("expected pen-test check %q to fail, got failed=%v", mustFail, failedChecks)
 			}
 		}
+		if !strings.Contains(jwtConfusionDetails, "JWKS") {
+			t.Fatalf("expected jwt-alg-confusion-and-claims failure to catch JWKS public-key confusion, got %q", jwtConfusionDetails)
+		}
 
 		paths := assertReportBundleAndChecksum(t, t.TempDir(), card, polRes)
 		htmlBytes, _ := os.ReadFile(paths.HTMLPath)
 		if !strings.Contains(string(htmlBytes), "Toxic Cycle") || !strings.Contains(string(htmlBytes), "FAILED") {
 			t.Fatalf("expected dashboard HTML to contain Toxic Cycle and FAILED badge")
+		}
+		sarifBytes, _ := os.ReadFile(paths.SARIFPath)
+		if !strings.Contains(string(sarifBytes), "codeFlows") {
+			t.Fatalf("expected SARIF output to include codeFlows for route->sink finding")
 		}
 	})
 
@@ -842,6 +1000,13 @@ func Verify(tok string) bool {
 		if len(scFindings) != 0 {
 			t.Fatalf("expected 0 supplychain findings on hardened repo, got %+v", scFindings)
 		}
+		leakFindings, err := sast.ScanStaticResourceLeaks(repoDir, types.LangGo)
+		if err != nil {
+			t.Fatalf("static leak scan error: %v", err)
+		}
+		if len(leakFindings) != 0 {
+			t.Fatalf("expected 0 static leak findings on hardened repo, got %+v", leakFindings)
+		}
 
 		srcGraph, err := graph.BuildSourceGraphFromDir(repoDir, types.LangGo)
 		if err != nil {
@@ -888,6 +1053,30 @@ func Verify(tok string) bool {
 			}
 		}
 
+		const mib = 1024 * 1024
+		baseTs := int64(1_700_000_000_000)
+		healthyMiBs := []int64{30, 38, 48, 49, 48, 50, 52, 48, 51, 52, 48, 49, 49, 49}
+		var healthySamples []types.MemorySample
+		for i, mb := range healthyMiBs {
+			healthySamples = append(healthySamples, types.MemorySample{
+				TimestampMs: baseTs + int64(i)*1000,
+				RSSBytes:    mb * mib,
+				OpenFDs:     24,
+			})
+		}
+		healthyMem := load.AnalyzeMemoryPhases(healthySamples, nil, nil, load.MemoryAnalyzeOptions{
+			WarmupDuration:          5 * time.Second,
+			CooldownDuration:        3 * time.Second,
+			TotalRequests:           5000,
+			MaxRetainedDriftPercent: 15.0,
+			MaxSlopeBytesPerReq:     1024.0,
+			MaxFDGrowth:             32,
+			MaxGoroutineGrowth:      32,
+		})
+		if healthyMem.LeakDetected || healthyMem.RetainedDriftPercent >= 5.0 {
+			t.Fatalf("expected healthy cold-start warmup to pass cleanly, got %+v", healthyMem)
+		}
+
 		card := types.ConformanceScorecard{
 			TargetName:     m.Name,
 			Language:       m.Language,
@@ -896,6 +1085,7 @@ func Verify(tok string) bool {
 			SourceGraph:    analyzedSrc,
 			PackageGraph:   analyzedPkg,
 			PenTestResults: ptResults,
+			MemoryAnalysis: &healthyMem,
 		}
 		polRes := policy.EvaluateSecurityPolicy(card, policy.StrictSecurityPolicy())
 		if !polRes.Passed || len(polRes.Violations) != 0 {

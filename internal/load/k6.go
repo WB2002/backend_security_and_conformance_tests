@@ -31,98 +31,128 @@ func normalizePath(p string) string {
 	return trimmed
 }
 
+func refreshBodyKey(refreshPath string) string {
+	cleaned := strings.TrimSpace(refreshPath)
+	cleaned = strings.TrimPrefix(cleaned, "$.")
+	cleaned = strings.TrimPrefix(cleaned, "$")
+	cleaned = strings.TrimPrefix(cleaned, ".")
+	parts := strings.Split(cleaned, ".")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if seg := strings.TrimSpace(parts[i]); seg != "" {
+			return seg
+		}
+	}
+	return "refreshToken"
+}
+
+type k6ProfileSpec struct {
+	stagesJS          string
+	secondaryDuration string
+	thresholdsJS      string
+}
+
+func resolveK6ProfileSpec(profile LoadProfile) k6ProfileSpec {
+	switch profile {
+	case ProfileStress:
+		return k6ProfileSpec{
+			stagesJS:          `[{ duration: "15s", target: 50 }, { duration: "30s", target: 150 }, { duration: "15s", target: 0 }]`,
+			secondaryDuration: "30s",
+			thresholdsJS:      `"http_req_duration": ["p(95)<500", "p(99)<1000"], "http_req_failed": ["rate<0.01"]`,
+		}
+	case ProfileSoak:
+		return k6ProfileSpec{
+			stagesJS:          `[{ duration: "30s", target: 40 }, { duration: "5m", target: 40 }, { duration: "30s", target: 0 }]`,
+			secondaryDuration: "5m",
+			thresholdsJS:      `"http_req_duration": ["p(95)<300", "p(99)<600"], "http_req_failed": ["rate<0.005"]`,
+		}
+	default:
+		return k6ProfileSpec{
+			stagesJS:          `[{ duration: "10s", target: 20 }, { duration: "20s", target: 20 }, { duration: "10s", target: 0 }]`,
+			secondaryDuration: "20s",
+			thresholdsJS:      `"http_req_duration": ["p(95)<250", "p(99)<500"], "http_req_failed": ["rate<0.005"]`,
+		}
+	}
+}
+
+func defaultIfEmpty(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
+}
+
+// GenerateK6Script generates a multi-scenario Grafana k6 script exercising read paths,
+// optional CRUD lifecycle, auth login/refresh churn, WebSocket churn, and 4xx error-abort paths.
 func GenerateK6Script(m types.BoilerplateManifest, baseURL string, profile LoadProfile) string {
 	targetBase := strings.TrimRight(baseURL, "/")
 	healthPath := normalizePath(m.Capabilities.Health.Path)
-
-	var stagesJS, thresholdsJS string
-	switch profile {
-	case ProfileStress:
-		stagesJS = `[{ duration: "15s", target: 50 }, { duration: "30s", target: 150 }, { duration: "15s", target: 0 }]`
-		thresholdsJS = `"http_req_duration": ["p(95)<500", "p(99)<1000"], "http_req_failed": ["rate<0.01"]`
-	case ProfileSoak:
-		stagesJS = `[{ duration: "30s", target: 40 }, { duration: "5m", target: 40 }, { duration: "30s", target: 0 }]`
-		thresholdsJS = `"http_req_duration": ["p(95)<300", "p(99)<600"], "http_req_failed": ["rate<0.005"]`
-	default:
-		stagesJS = `[{ duration: "10s", target: 20 }, { duration: "20s", target: 20 }, { duration: "10s", target: 0 }]`
-		thresholdsJS = `"http_req_duration": ["p(95)<250", "p(99)<500"], "http_req_failed": ["rate<0.005"]`
-	}
+	spec := resolveK6ProfileSpec(profile)
 
 	auth := m.Capabilities.Auth
-	if auth == nil || strings.TrimSpace(auth.Login.Path) == "" || strings.TrimSpace(auth.Me.Path) == "" {
-		return fmt.Sprintf(`import http from "k6/http";
-import { check, sleep } from "k6";
+	hasAuth := auth != nil && strings.TrimSpace(auth.Login.Path) != ""
+	crud := m.Capabilities.CRUD
+	hasCRUD := crud != nil && strings.TrimSpace(crud.CollectionPath) != "" && strings.TrimSpace(crud.ItemPath) != ""
+	wsCap := m.Capabilities.WebSockets
+	hasWS := wsCap != nil && wsCap.Enabled && strings.TrimSpace(wsCap.Path) != ""
 
-export const options = {
-  stages: %s,
+	var b strings.Builder
+	b.WriteString(`import http from "k6/http";` + "\n")
+	if hasWS {
+		b.WriteString(`import ws from "k6/ws";` + "\n")
+	}
+	b.WriteString(`import { check, sleep } from "k6";` + "\n\n")
+
+	b.WriteString("export const options = {\n  scenarios: {\n")
+	b.WriteString(fmt.Sprintf(`    read_steady: {
+      executor: "ramping-vus",
+      exec: "readSteady",
+      stages: %s,
+    },
+`, spec.stagesJS))
+	if hasCRUD {
+		b.WriteString(fmt.Sprintf(`    crud_lifecycle: {
+      executor: "constant-vus",
+      exec: "crudLifecycle",
+      vus: 2,
+      duration: %q,
+    },
+`, spec.secondaryDuration))
+	}
+	if hasAuth {
+		b.WriteString(fmt.Sprintf(`    auth_session_churn: {
+      executor: "constant-vus",
+      exec: "authSessionChurn",
+      vus: 1,
+      duration: %q,
+    },
+`, spec.secondaryDuration))
+	}
+	if hasWS {
+		b.WriteString(fmt.Sprintf(`    ws_churn: {
+      executor: "constant-vus",
+      exec: "wsChurn",
+      vus: 2,
+      duration: %q,
+    },
+`, spec.secondaryDuration))
+	}
+	b.WriteString(fmt.Sprintf(`    error_abort_paths: {
+      executor: "constant-vus",
+      exec: "errorAbortPaths",
+      vus: 1,
+      duration: %q,
+    },
+  },
   thresholds: {
     %s
-  }
+  },
 };
 
 const BASE_URL = __ENV.BASE_URL || %q;
+`, spec.secondaryDuration, spec.thresholdsJS, targetBase))
 
-export default function () {
-  const res = http.get(BASE_URL + %q);
-  check(res, {
-    "status is 2xx": (r) => r.status >= 200 && r.status < 300,
-  });
-  sleep(0.1);
-}
-`, stagesJS, thresholdsJS, targetBase, healthPath)
-	}
-
-	registerPath := normalizePath(auth.Register.Path)
-	loginPath := normalizePath(auth.Login.Path)
-	mePath := normalizePath(auth.Me.Path)
-
-	regEmailField := auth.Register.EmailField
-	if regEmailField == "" {
-		regEmailField = "email"
-	}
-	regPasswordField := auth.Register.PasswordField
-	if regPasswordField == "" {
-		regPasswordField = "password"
-	}
-	loginEmailField := auth.Login.EmailField
-	if loginEmailField == "" {
-		loginEmailField = "email"
-	}
-	loginPasswordField := auth.Login.PasswordField
-	if loginPasswordField == "" {
-		loginPasswordField = "password"
-	}
-	tokenPath := auth.Login.TokenPath
-	if tokenPath == "" {
-		tokenPath = "accessToken"
-	}
-
-	extraFieldsJS := "{}"
-	if len(auth.Register.ExtraFields) > 0 {
-		if b, err := json.Marshal(auth.Register.ExtraFields); err == nil {
-			extraFieldsJS = string(b)
-		}
-	}
-
-	registerBlock := ""
-	if registerPath != "" {
-		registerBlock = fmt.Sprintf(`  const regPayload = Object.assign({}, %s, { %q: email, %q: password });
-  http.post(BASE_URL + %q, JSON.stringify(regPayload), jsonHeaders);
-`, extraFieldsJS, regEmailField, regPasswordField, registerPath)
-	}
-
-	return fmt.Sprintf(`import http from "k6/http";
-import { check, sleep } from "k6";
-
-export const options = {
-  stages: %s,
-  thresholds: {
-    %s
-  }
-};
-
-const BASE_URL = __ENV.BASE_URL || %q;
-
+	if hasAuth || hasCRUD {
+		b.WriteString(`
 function extractPath(obj, dotPath) {
   if (!obj || !dotPath) {
     return "";
@@ -142,9 +172,43 @@ function extractPath(obj, dotPath) {
     }
     curr = curr[parts[i]];
   }
-  return typeof curr === "string" ? curr : "";
+  if (typeof curr === "string" || typeof curr === "number") {
+    return String(curr);
+  }
+  return "";
 }
+`)
+	}
 
+	var loginPath, loginEmailField, loginPasswordField, tokenPath, refreshPath, refreshFieldKey, mePath string
+	if hasAuth {
+		registerPath := normalizePath(auth.Register.Path)
+		loginPath = normalizePath(auth.Login.Path)
+		mePath = normalizePath(auth.Me.Path)
+		if auth.Refresh != nil {
+			refreshPath = normalizePath(auth.Refresh.Path)
+		}
+		regEmailField := defaultIfEmpty(auth.Register.EmailField, "email")
+		regPasswordField := defaultIfEmpty(auth.Register.PasswordField, "password")
+		loginEmailField = defaultIfEmpty(auth.Login.EmailField, "email")
+		loginPasswordField = defaultIfEmpty(auth.Login.PasswordField, "password")
+		tokenPath = defaultIfEmpty(auth.Login.TokenPath, "accessToken")
+		refreshFieldKey = refreshBodyKey(auth.Login.RefreshPath)
+
+		extraFieldsJS := "{}"
+		if len(auth.Register.ExtraFields) > 0 {
+			if raw, err := json.Marshal(auth.Register.ExtraFields); err == nil {
+				extraFieldsJS = string(raw)
+			}
+		}
+		registerBlock := ""
+		if registerPath != "" {
+			registerBlock = fmt.Sprintf(`  const regPayload = Object.assign({}, %s, { %q: email, %q: password });
+  http.post(BASE_URL + %q, JSON.stringify(regPayload), jsonHeaders);
+`, extraFieldsJS, regEmailField, regPasswordField, registerPath)
+		}
+
+		b.WriteString(fmt.Sprintf(`
 export function setup() {
   const email = "k6-load-" + Date.now() + "-" + Math.floor(Math.random() * 100000) + "@example.com";
   const password = "K6LoadTest!2026#Secure";
@@ -152,24 +216,25 @@ export function setup() {
 %s  const loginPayload = { %q: email, %q: password };
   const loginRes = http.post(BASE_URL + %q, JSON.stringify(loginPayload), jsonHeaders);
   let token = "";
+  let refreshToken = "";
   try {
     const parsed = loginRes.json();
     token = extractPath(parsed, %q);
+    refreshToken = extractPath(parsed, %q);
   } catch (_) {
     token = "";
   }
   if (loginRes.status < 200 || loginRes.status >= 300 || !token) {
     throw new Error("k6 setup failed: unable to acquire bearer token from " + BASE_URL + %q + " (status " + loginRes.status + ")");
   }
-  return { token: token };
+  return { token: token, refreshToken: refreshToken, email: email, password: password };
 }
+`, registerBlock, loginEmailField, loginPasswordField, loginPath, tokenPath, defaultIfEmpty(auth.Login.RefreshPath, "refreshToken"), loginPath))
+	}
 
-export default function (data) {
-  const healthRes = http.get(BASE_URL + %q);
-  check(healthRes, {
-    "health status is 2xx": (r) => r.status >= 200 && r.status < 300,
-  });
-  if (data && data.token) {
+	meBlock := ""
+	if hasAuth && mePath != "" {
+		meBlock = fmt.Sprintf(`  if (data && data.token) {
     const meRes = http.get(BASE_URL + %q, {
       headers: { Authorization: "Bearer " + data.token },
     });
@@ -177,9 +242,132 @@ export default function (data) {
       "me status is 2xx": (r) => r.status >= 200 && r.status < 300,
     });
   }
-  sleep(0.1);
+`, mePath)
+	}
+	b.WriteString(fmt.Sprintf(`
+export function readSteady(data) {
+  const healthRes = http.get(BASE_URL + %q);
+  check(healthRes, {
+    "health status is 2xx": (r) => r.status >= 200 && r.status < 300,
+  });
+%s  sleep(0.1);
 }
-`, stagesJS, thresholdsJS, targetBase, registerBlock, loginEmailField, loginPasswordField, loginPath, tokenPath, loginPath, healthPath, mePath)
+`, healthPath, meBlock))
+
+	if hasCRUD {
+		collPath := normalizePath(crud.CollectionPath)
+		itemPath := normalizePath(crud.ItemPath)
+		idPath := defaultIfEmpty(crud.IDPath, "id")
+		createBodyJS := `{"name":"k6-conformance-item"}`
+		if len(crud.SampleCreateBody) > 0 {
+			if raw, err := json.Marshal(crud.SampleCreateBody); err == nil {
+				createBodyJS = string(raw)
+			}
+		}
+		b.WriteString(fmt.Sprintf(`
+export function crudLifecycle(data) {
+  const headers = { "Content-Type": "application/json" };
+  if (data && data.token) {
+    headers["Authorization"] = "Bearer " + data.token;
+  }
+  const params = { headers: headers };
+  const createRes = http.post(BASE_URL + %q, JSON.stringify(%s), params);
+  check(createRes, {
+    "crud create 2xx": (r) => r.status >= 200 && r.status < 300,
+  });
+  let itemId = "";
+  try {
+    itemId = extractPath(createRes.json(), %q);
+  } catch (_) {
+    itemId = "";
+  }
+  if (itemId) {
+    const itemURL = BASE_URL + %q.replace("{id}", encodeURIComponent(itemId)).replace(":id", encodeURIComponent(itemId));
+    const getRes = http.get(itemURL, params);
+    check(getRes, { "crud get 2xx": (r) => r.status >= 200 && r.status < 300 });
+    const patchRes = http.patch(itemURL, JSON.stringify(%s), params);
+    check(patchRes, { "crud patch <500": (r) => r.status < 500 });
+    const delRes = http.del(itemURL, null, params);
+    check(delRes, { "crud delete 2xx": (r) => r.status >= 200 && r.status < 300 });
+  }
+  sleep(0.2);
+}
+`, collPath, createBodyJS, idPath, itemPath, createBodyJS))
+	}
+
+	if hasAuth {
+		refreshBlock := ""
+		if refreshPath != "" {
+			refreshBlock = fmt.Sprintf(`  let sessionRefresh = "";
+  try {
+    sessionRefresh = extractPath(loginRes.json(), %q);
+  } catch (_) {
+    sessionRefresh = "";
+  }
+  if (sessionRefresh) {
+    const refreshRes = http.post(BASE_URL + %q, JSON.stringify({ %q: sessionRefresh }), params);
+    check(refreshRes, { "auth churn refresh 2xx": (r) => r.status >= 200 && r.status < 300 });
+  }
+`, defaultIfEmpty(auth.Login.RefreshPath, "refreshToken"), refreshPath, refreshFieldKey)
+		}
+		b.WriteString(fmt.Sprintf(`
+export function authSessionChurn(data) {
+  if (!data || !data.email) {
+    sleep(0.2);
+    return;
+  }
+  const params = { headers: { "Content-Type": "application/json" } };
+  const loginRes = http.post(BASE_URL + %q, JSON.stringify({ %q: data.email, %q: data.password }), params);
+  check(loginRes, { "auth churn login 2xx": (r) => r.status >= 200 && r.status < 300 });
+%s  sleep(0.25);
+}
+`, loginPath, loginEmailField, loginPasswordField, refreshBlock))
+	}
+
+	if hasWS {
+		wsPath := normalizePath(wsCap.Path)
+		b.WriteString(fmt.Sprintf(`
+export function wsChurn(data) {
+  const wsBase = BASE_URL.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+  const headers = {};
+  if (data && data.token) {
+    headers["Authorization"] = "Bearer " + data.token;
+  }
+  const res = ws.connect(wsBase + %q, { headers: headers }, function (socket) {
+    socket.on("open", function () {
+      socket.send(JSON.stringify({ type: "ping" }));
+      socket.close();
+    });
+  });
+  check(res, { "ws handshake ok or auth-checked": (r) => r && (r.status === 101 || r.status === 200) });
+  sleep(0.25);
+}
+`, wsPath))
+	}
+
+	errorPath := healthPath
+	if hasCRUD {
+		errorPath = normalizePath(crud.CollectionPath)
+	} else if hasAuth {
+		errorPath = loginPath
+	}
+	b.WriteString(fmt.Sprintf(`
+export function errorAbortPaths() {
+  const errCallback = http.expectedStatuses({ min: 400, max: 499 });
+  const badRes = http.post(BASE_URL + %q, "{invalid-json", {
+    headers: { "Content-Type": "application/json" },
+    responseCallback: errCallback,
+  });
+  check(badRes, { "invalid json handled cleanly (4xx)": (r) => r.status >= 400 && r.status < 500 });
+  const missRes = http.get(BASE_URL + "/conformance-nonexistent-4xx-probe", {
+    responseCallback: errCallback,
+  });
+  check(missRes, { "missing route returns 4xx": (r) => r.status >= 400 && r.status < 500 });
+  sleep(0.25);
+}
+`, errorPath))
+
+	return b.String()
 }
 
 type k6SummaryDoc struct {
