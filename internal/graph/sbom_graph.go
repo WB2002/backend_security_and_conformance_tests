@@ -118,6 +118,16 @@ func buildOSVFinding(pkgName, pkgVersion string, v osvVulnerability) types.Secur
 	if isKEV {
 		severity = types.SeverityCritical
 	}
+	cveID := strings.TrimSpace(v.ID)
+	if !strings.HasPrefix(strings.ToUpper(cveID), "CVE-") {
+		for _, alias := range v.Aliases {
+			trimmed := strings.TrimSpace(alias)
+			if strings.HasPrefix(strings.ToUpper(trimmed), "CVE-") {
+				cveID = trimmed
+				break
+			}
+		}
+	}
 	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(v.ID)), "MAL-") {
 		category = types.CategoryMalware
 		severity = types.SeverityCritical
@@ -129,7 +139,7 @@ func buildOSVFinding(pkgName, pkgVersion string, v osvVulnerability) types.Secur
 		Severity:    severity,
 		Title:       fmt.Sprintf("%s in %s@%s", v.ID, pkgName, pkgVersion),
 		Description: v.Summary,
-		CVE:         v.ID,
+		CVE:         cveID,
 		PackageName: pkgName,
 		KEV:         isKEV,
 	}

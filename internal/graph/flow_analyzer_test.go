@@ -280,3 +280,34 @@ end
 	}
 }
 
+func TestGoRouteExtractionIgnoresNonRouteGetCalls(t *testing.T) {
+	files := map[string]string{
+		"internal/http/handler.go": `
+package http
+
+import "net/http"
+
+func Register(r Router) {
+	r.Get("/orders", listOrders)
+}
+
+func listOrders(w http.ResponseWriter, r *http.Request) {
+	_ = r.Header.Get("Authorization")
+	_ = r.URL.Query().Get("id")
+	_ = ctx.Get("user")
+	_, _ = http.Get("https://example.com/status")
+}
+`,
+	}
+
+	g, _ := graph.AnalyzeArchitectureAndRouteFlows("", files, types.DependencyGraph{}, nil, nil)
+	if len(g.RouteFindings) != 1 {
+		t.Fatalf("expected exactly 1 route finding (GET /orders), got %d: %+v", len(g.RouteFindings), g.RouteFindings)
+	}
+	rf := g.RouteFindings[0]
+	if rf.Method != "GET" || rf.Path != "/orders" {
+		t.Fatalf("expected GET /orders, got %s %s", rf.Method, rf.Path)
+	}
+}
+
+

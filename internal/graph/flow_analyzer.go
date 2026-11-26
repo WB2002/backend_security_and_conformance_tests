@@ -210,7 +210,7 @@ var (
 	nestMethodRe     = regexp.MustCompile(`@(Get|Post|Put|Patch|Delete)\s*\(\s*(?:['"]([^'"]*)['"])?\s*\)`)
 	jsRouteRe        = regexp.MustCompile(`\b(?:app|router|fastify|server)\.(get|post|put|patch|delete)\s*\(\s*['"]([^'"]+)['"]`)
 	goHandleFuncRe   = regexp.MustCompile(`\.(?:HandleFunc|Handle)\s*\(\s*"([^"]+)"`)
-	goMethodRouteRe  = regexp.MustCompile(`\.(Get|Post|Put|Patch|Delete|GET|POST|PUT|PATCH|DELETE)\s*\(\s*"([^"]+)"`)
+	goMethodRouteRe  = regexp.MustCompile(`\.(Get|Post|Put|Patch|Delete|GET|POST|PUT|PATCH|DELETE)\s*\(\s*"(/[^"]*)"`)
 	pyDecoratorRe    = regexp.MustCompile(`@(?:app|router|bp|blueprint)\.(get|post|put|patch|delete)\s*\(\s*['"]([^'"]+)['"]`)
 	pyDjangoPathRe   = regexp.MustCompile(`\bpath\s*\(\s*['"]([^'"]+)['"]`)
 	exScopeRe        = regexp.MustCompile(`^\s*scope\s+"([^"]+)"`)
