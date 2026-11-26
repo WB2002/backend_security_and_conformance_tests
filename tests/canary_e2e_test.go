@@ -856,12 +856,23 @@ func Verify(tok string) bool {
 		if err != nil {
 			t.Fatalf("pentest suite error: %v", err)
 		}
-		if len(ptResults) != 18 {
-			t.Fatalf("expected 18 pen-test checks, got %d: %+v", len(ptResults), ptResults)
+		if len(ptResults) != 23 {
+			t.Fatalf("expected 23 pen-test checks, got %d: %+v", len(ptResults), ptResults)
+		}
+		expectedSkipped := map[string]bool{
+			"graphql-introspection-batch-depth":   true,
+			"multipart-upload-polyglot-traversal": true,
+			"openapi-bfla-matrix":                 true,
 		}
 		for _, pt := range ptResults {
+			if expectedSkipped[pt.ID] {
+				if pt.Status != "skipped" {
+					t.Fatalf("expected unconfigured capability check %s to report skipped, got %+v", pt.ID, pt)
+				}
+				continue
+			}
 			if pt.Status != "passed" {
-				t.Fatalf("expected all 18 pen-test checks to pass on hardened reference target, got %+v", pt)
+				t.Fatalf("expected pen-test check to pass on hardened reference target, got %+v", pt)
 			}
 		}
 		if len(canary.Hits()) != 0 {
