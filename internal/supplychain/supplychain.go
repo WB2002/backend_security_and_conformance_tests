@@ -938,30 +938,33 @@ func scanGitHubWorkflows(targetDir string) []types.SecurityFinding {
 				if isYAMLBlockScalarHeader(rhs) {
 					inRunBlock = true
 					runIndent = indent
-				} else if reGHAUntrustedExpr.MatchString(rhs) {
-					findings = append(findings, types.SecurityFinding{
-						ID:          "supplychain-github-actions-injection",
-						Category:    types.CategorySupplyChain,
-						Tool:        "supplychain",
-						Severity:    types.SeverityCritical,
-						Title:       fmt.Sprintf("GitHub Actions script injection via untrusted expression in %s", relPath),
-						Description: fmt.Sprintf("Untrusted github.event.* expression interpolated directly into shell run step on line %d.", i+1),
-						FilePath:    relPath,
-						Line:        i + 1,
-						CWE:         "CWE-78",
-					})
-				} else if reGHARunEnvInject.MatchString(rhs) {
-					findings = append(findings, types.SecurityFinding{
-						ID:          "supplychain-github-actions-injection",
-						Category:    types.CategorySupplyChain,
-						Tool:        "supplychain",
-						Severity:    types.SeverityHigh,
-						Title:       fmt.Sprintf("Dangerous GITHUB_ENV/GITHUB_PATH/LD_PRELOAD injection in %s", relPath),
-						Description: fmt.Sprintf("Run step on line %d writes to GITHUB_ENV/GITHUB_PATH or sets LD_PRELOAD.", i+1),
-						FilePath:    relPath,
-						Line:        i + 1,
-						CWE:         "CWE-78",
-					})
+				} else {
+					if reGHAUntrustedExpr.MatchString(rhs) {
+						findings = append(findings, types.SecurityFinding{
+							ID:          "supplychain-github-actions-injection",
+							Category:    types.CategorySupplyChain,
+							Tool:        "supplychain",
+							Severity:    types.SeverityCritical,
+							Title:       fmt.Sprintf("GitHub Actions script injection via untrusted expression in %s", relPath),
+							Description: fmt.Sprintf("Untrusted github.event.* expression interpolated directly into shell run step on line %d.", i+1),
+							FilePath:    relPath,
+							Line:        i + 1,
+							CWE:         "CWE-78",
+						})
+					}
+					if reGHARunEnvInject.MatchString(rhs) {
+						findings = append(findings, types.SecurityFinding{
+							ID:          "supplychain-github-actions-injection",
+							Category:    types.CategorySupplyChain,
+							Tool:        "supplychain",
+							Severity:    types.SeverityHigh,
+							Title:       fmt.Sprintf("Dangerous GITHUB_ENV/GITHUB_PATH/LD_PRELOAD injection in %s", relPath),
+							Description: fmt.Sprintf("Run step on line %d writes to GITHUB_ENV/GITHUB_PATH or sets LD_PRELOAD.", i+1),
+							FilePath:    relPath,
+							Line:        i + 1,
+							CWE:         "CWE-78",
+						})
+					}
 				}
 			} else if inRunBlock {
 				if reGHAUntrustedExpr.MatchString(line) {
@@ -976,7 +979,8 @@ func scanGitHubWorkflows(targetDir string) []types.SecurityFinding {
 						Line:        i + 1,
 						CWE:         "CWE-78",
 					})
-				} else if reGHARunEnvInject.MatchString(line) {
+				}
+				if reGHARunEnvInject.MatchString(line) {
 					findings = append(findings, types.SecurityFinding{
 						ID:          "supplychain-github-actions-injection",
 						Category:    types.CategorySupplyChain,

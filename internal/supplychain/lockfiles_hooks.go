@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
@@ -1227,6 +1229,7 @@ func scanTyposquattingAndAge(ctx context.Context, targetDir string, opts ScanOpt
 	}
 
 	var findings []types.SecurityFinding
+	var enrichTargets []directDep
 	for _, dep := range deps {
 		candidate := strings.ToLower(dep.Name)
 		if dep.Ecosystem == "go" {
@@ -1260,16 +1263,79 @@ func scanTyposquattingAndAge(ctx context.Context, targetDir string, opts ScanOpt
 		}
 
 		if opts.OnlineEnrich && (dep.Ecosystem == "npm" || dep.Ecosystem == "pypi" || dep.Ecosystem == "go") {
-			if f, ok := checkDepsDevPackageAge(ctx, dep, opts.HTTPClient); ok {
-				findings = append(findings, f)
-			}
+			enrichTargets = append(enrichTargets, dep)
 		}
+	}
+
+	if opts.OnlineEnrich && len(enrichTargets) > 0 {
+		findings = append(findings, enrichDepsDevAgesBounded(ctx, enrichTargets, opts.HTTPClient)...)
 	}
 
 	return findings
 }
 
-func checkDepsDevPackageAge(ctx context.Context, dep directDep, client *http.Client) (types.SecurityFinding, bool) {
+func enrichDepsDevAgesBounded(ctx context.Context, targets []directDep, client *http.Client) []types.SecurityFinding {
+	const (
+		maxWorkers             = 8
+		overallEnrichBudget    = 5 * time.Second
+		maxConsecutiveNetErrs  = 2
+	)
+	if client == nil {
+		client = &http.Client{Timeout: 3 * time.Second}
+	}
+	enrichCtx, cancel := context.WithTimeout(ctx, overallEnrichBudget)
+	defer cancel()
+
+	results := make([]*types.SecurityFinding, len(targets))
+	jobs := make(chan int, len(targets))
+	for i := range targets {
+		jobs <- i
+	}
+	close(jobs)
+
+	workers := maxWorkers
+	if len(targets) < workers {
+		workers = len(targets)
+	}
+
+	var consecutiveNetErrs atomic.Int32
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if enrichCtx.Err() != nil {
+					return
+				}
+				f, ok, netErr := checkDepsDevPackageAge(enrichCtx, targets[idx], client)
+				if netErr {
+					if consecutiveNetErrs.Add(1) >= maxConsecutiveNetErrs {
+						cancel()
+						return
+					}
+					continue
+				}
+				consecutiveNetErrs.Store(0)
+				if ok {
+					fCopy := f
+					results[idx] = &fCopy
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	var findings []types.SecurityFinding
+	for _, r := range results {
+		if r != nil {
+			findings = append(findings, *r)
+		}
+	}
+	return findings
+}
+
+func checkDepsDevPackageAge(ctx context.Context, dep directDep, client *http.Client) (types.SecurityFinding, bool, bool) {
 	if client == nil {
 		client = &http.Client{Timeout: 3 * time.Second}
 	}
@@ -1279,23 +1345,23 @@ func checkDepsDevPackageAge(ctx context.Context, dep directDep, client *http.Cli
 	endpoint := fmt.Sprintf("https://api.deps.dev/v3alpha/systems/%s/packages/%s", dep.Ecosystem, url.PathEscape(dep.Name))
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return types.SecurityFinding{}, false
+		return types.SecurityFinding{}, false, false
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return types.SecurityFinding{}, false
+		return types.SecurityFinding{}, false, true
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return types.SecurityFinding{}, false
+		return types.SecurityFinding{}, false, false
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return types.SecurityFinding{}, false
+		return types.SecurityFinding{}, false, true
 	}
 	var parsed depsDevPackageResp
 	if json.Unmarshal(body, &parsed) != nil || len(parsed.Versions) == 0 {
-		return types.SecurityFinding{}, false
+		return types.SecurityFinding{}, false, false
 	}
 
 	var earliest time.Time
@@ -1312,7 +1378,7 @@ func checkDepsDevPackageAge(ctx context.Context, dep directDep, client *http.Cli
 		}
 	}
 	if earliest.IsZero() {
-		return types.SecurityFinding{}, false
+		return types.SecurityFinding{}, false, false
 	}
 	age := time.Since(earliest)
 	if age >= 0 && age < 14*24*time.Hour {
@@ -1327,9 +1393,9 @@ func checkDepsDevPackageAge(ctx context.Context, dep directDep, client *http.Cli
 			FilePath:    dep.FilePath,
 			PackageName: dep.Name,
 			CWE:         "CWE-829",
-		}, true
+		}, true, false
 	}
-	return types.SecurityFinding{}, false
+	return types.SecurityFinding{}, false, false
 }
 
 // scanGitModules checks .gitmodules for cleartext http://, ext:: remote helper execution,
@@ -1354,7 +1420,7 @@ func scanGitModules(targetDir string) []types.SecurityFinding {
 		if key != "url" {
 			continue
 		}
-		val := strings.TrimSpace(trimmed[eq+1:])
+		val := strings.Trim(strings.TrimSpace(trimmed[eq+1:]), `"'`)
 		lowerVal := strings.ToLower(val)
 		switch {
 		case strings.HasPrefix(lowerVal, "ext::"):

@@ -735,6 +735,26 @@ func TestOnlineEnrichGracefulTimeout(t *testing.T) {
 	if !slices.ContainsFunc(fastFindings, func(f types.SecurityFinding) bool { return f.ID == "supplychain-newly-published-package" }) {
 		t.Fatalf("expected supplychain-newly-published-package finding, got %+v", fastFindings)
 	}
+
+	// Verify bounded concurrency + short-circuit prevents linear N*timeout stall on offline hosts.
+	multiRepo := t.TempDir()
+	writeFile(t, multiRepo, "package.json", `{"name":"multi","dependencies":{"alpha-one":"1.0.0","beta-two":"1.0.0","gamma-three":"1.0.0","delta-four":"1.0.0","epsilon-five":"1.0.0","zeta-six":"1.0.0","eta-seven":"1.0.0","theta-eight":"1.0.0","reqeusts":"1.0.0"}}`)
+	writeFile(t, multiRepo, "package-lock.json", `{"lockfileVersion":3,"packages":{"":{"name":"multi"}}}`)
+	start := time.Now()
+	multiFindings, err := supplychain.ScanRepositoryWithOptions(context.Background(), multiRepo, types.LangTypeScript, supplychain.ScanOptions{
+		OnlineEnrich: true,
+		HTTPClient:   client,
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("expected 0 errors on multi-dep offline timeout, got: %v", err)
+	}
+	if elapsed > 120*time.Millisecond {
+		t.Fatalf("expected bounded/short-circuited offline enrichment well below linear N*timeout, took %v", elapsed)
+	}
+	if !slices.ContainsFunc(multiFindings, func(f types.SecurityFinding) bool { return f.ID == "supplychain-typosquat-suspect" }) {
+		t.Fatalf("expected offline typosquat finding preserved on multi-dep timeout, got %+v", multiFindings)
+	}
 }
 
 func TestScanLockfilesAndHooks_PolyglotCoverage(t *testing.T) {
@@ -764,7 +784,7 @@ func TestScanLockfilesAndHooks_PolyglotCoverage(t *testing.T) {
 		}
 	})
 
-	t.Run("polyglot lockfiles yarn.lock, uv.lock, poetry.lock, and unpinned requirements.txt", func(t *testing.T) {
+	t.Run("polyglot lockfiles yarn.lock and unpinned requirements.txt", func(t *testing.T) {
 		repo := t.TempDir()
 		writeFile(t, repo, "yarn.lock", "foo@^1.0.0:\n  version \"1.0.0\"\n  resolved \"https://rogue.yarn.invalid/foo-1.0.0.tgz\"\n")
 		writeFile(t, repo, "requirements.txt", "requests>=2.31.0\n")
@@ -785,6 +805,137 @@ func TestScanLockfilesAndHooks_PolyglotCoverage(t *testing.T) {
 			if !slices.ContainsFunc(findings, func(f types.SecurityFinding) bool { return f.ID == want }) {
 				t.Errorf("expected finding %q in %+v", want, findings)
 			}
+		}
+	})
+
+	t.Run("uv.lock missing hash and untrusted/cleartext URL", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, "uv.lock", `version = 1
+
+[[package]]
+name = "demo"
+version = "1.0.0"
+source = { registry = "http://rogue.pypi.invalid/simple" }
+sdist = { url = "https://rogue.pypi.invalid/demo-1.0.0.tar.gz", size = 1234 }
+`)
+		findings, err := supplychain.ScanRepository(repo, types.LangPython)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hasCleartext, hasMissingHash, hasUntrusted bool
+		for _, f := range findings {
+			if f.FilePath != "uv.lock" {
+				continue
+			}
+			if f.ID == "supplychain-lockfile-integrity" && strings.Contains(f.Title, "Cleartext HTTP") {
+				hasCleartext = true
+			}
+			if f.ID == "supplychain-lockfile-integrity" && strings.Contains(f.Title, "Missing SHA") {
+				hasMissingHash = true
+			}
+			if f.ID == "supplychain-untrusted-registry" {
+				hasUntrusted = true
+			}
+		}
+		if !hasCleartext || !hasMissingHash || !hasUntrusted {
+			t.Fatalf("expected cleartext, missing hash, and untrusted registry findings for uv.lock, got %+v", findings)
+		}
+	})
+
+	t.Run("poetry.lock missing hash and untrusted/cleartext URL", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, "poetry.lock", `[[package]]
+name = "demo"
+version = "1.0.0"
+files = [
+    {file = "demo-1.0.0.tar.gz"},
+]
+
+[package.source]
+type = "legacy"
+url = "http://rogue.poetry.invalid/simple"
+`)
+		findings, err := supplychain.ScanRepository(repo, types.LangPython)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hasCleartext, hasMissingHash, hasUntrusted bool
+		for _, f := range findings {
+			if f.FilePath != "poetry.lock" {
+				continue
+			}
+			if f.ID == "supplychain-lockfile-integrity" && strings.Contains(f.Title, "Cleartext HTTP") {
+				hasCleartext = true
+			}
+			if f.ID == "supplychain-lockfile-integrity" && strings.Contains(f.Title, "Missing SHA") {
+				hasMissingHash = true
+			}
+			if f.ID == "supplychain-untrusted-registry" {
+				hasUntrusted = true
+			}
+		}
+		if !hasCleartext || !hasMissingHash || !hasUntrusted {
+			t.Fatalf("expected cleartext, missing hash, and untrusted registry findings for poetry.lock, got %+v", findings)
+		}
+	})
+
+	t.Run("quoted .gitmodules URLs are detected", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, ".gitmodules", `[submodule "ext"]
+	path = ext
+	url = "ext::sh -c %G/pwn"
+[submodule "http"]
+	path = http
+	url = "http://evil.example/repo.git"
+[submodule "rel"]
+	path = rel
+	url = '../outside/repo.git'
+`)
+		findings, err := supplychain.ScanRepository(repo, types.LangGo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hijackCount int
+		for _, f := range findings {
+			if f.ID == "supplychain-gitmodules-hijack" {
+				hijackCount++
+			}
+		}
+		if hijackCount != 3 {
+			t.Fatalf("expected 3 supplychain-gitmodules-hijack findings for quoted URLs, got %d: %+v", hijackCount, findings)
+		}
+	})
+
+	t.Run("GitHub Actions reports both untrusted expression and GITHUB_ENV injection on the same line", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, ".github/workflows/both.yml", `permissions:
+  contents: read
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "T=${{ github.event.pull_request.title }}" >> $GITHUB_ENV
+      - run: |
+          echo "B=${{ github.event.pull_request.body }}" >> $GITHUB_PATH
+`)
+		findings, err := supplychain.ScanRepository(repo, types.LangGo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var exprCount, envCount int
+		for _, f := range findings {
+			if f.ID == "supplychain-github-actions-injection" {
+				if strings.Contains(f.Title, "untrusted expression") {
+					exprCount++
+				}
+				if strings.Contains(f.Title, "GITHUB_ENV/GITHUB_PATH/LD_PRELOAD") {
+					envCount++
+				}
+			}
+		}
+		if exprCount != 2 || envCount != 2 {
+			t.Fatalf("expected 2 untrusted expression and 2 GITHUB_ENV/PATH findings (inline + block), got expr=%d env=%d: %+v", exprCount, envCount, findings)
 		}
 	})
 }
