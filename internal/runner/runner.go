@@ -59,11 +59,11 @@ var toolRegistry = map[ToolName]toolSpec{
 	ToolNuclei:       {LocalBinary: "nuclei", DockerImage: "projectdiscovery/nuclei:v3.3.8@sha256:3c37049ecfd2d3230add2e7308249f694bcb43cfe243d090d6046cd6c35ff855", NeedsHostGateway: true},
 	ToolSchemathesis: {LocalBinary: "schemathesis", DockerImage: "schemathesis/schemathesis:v3.39.8@sha256:d1d7f848c09f1cb270e421a0803a5722bcd898bbb2f365a8a5172e24b4dbbf5d", NeedsHostGateway: true},
 	ToolK6:           {LocalBinary: "k6", DockerImage: "grafana/k6:0.55.0@sha256:b24f418fc99a26dd57904c952c03bfaf79462be18508acc45aafa07ff68e7df2", NeedsHostGateway: true},
-	ToolGosec:        {LocalBinary: "gosec", DockerImage: "securego/gosec:2.22.0@sha256:4c2c12f38b4e9c7a8d0f1e2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c", DefaultOffline: true, ReadOnlyRootFS: true},
-	ToolGovulncheck:  {LocalBinary: "govulncheck", DockerImage: "golang:1.24.0-alpine@sha256:8e5c1f2a9b4d3e7c6a1f0b2d4e6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f", DockerCommand: []string{"govulncheck"}},
-	ToolBandit:       {LocalBinary: "bandit", DockerImage: "ghcr.io/pycqa/bandit/bandit:1.8.3@sha256:2f4a6c8e0b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a", DefaultOffline: true, ReadOnlyRootFS: true},
+	ToolGosec:        {LocalBinary: "gosec", DockerImage: "securego/gosec:2.22.0@sha256:5db2c6466767618cb90e43e49b8d82d8cd7bfbf3d9f644a1eab707f273bde7ef", DefaultOffline: true, ReadOnlyRootFS: true},
+	ToolGovulncheck:  {LocalBinary: "govulncheck"},
+	ToolBandit:       {LocalBinary: "bandit", DockerImage: "ghcr.io/pycqa/bandit/bandit@sha256:70c0d5de64db59de9b213348fc2bede3216c55fccb789386efe56440c384b29a", DefaultOffline: true, ReadOnlyRootFS: true},
 	ToolSobelow:      {LocalBinary: "sobelow", DockerImage: "ghcr.io/nccgroup/sobelow:0.13.0@sha256:5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d", DefaultOffline: true, ReadOnlyRootFS: true},
-	ToolYARA:         {LocalBinary: "yara", DockerImage: "blacktop/yara:4.5.2@sha256:7d9f1a3c5e7b9d1f3a5c7e9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f", DefaultOffline: true, ReadOnlyRootFS: true},
+	ToolYARA:         {LocalBinary: "yara", DockerImage: "blacktop/yara@sha256:10ec7fc0db0df35eeeb8c37163d07df7823c2d19886443f807a1859f5df5fee8", DefaultOffline: true, ReadOnlyRootFS: true},
 }
 
 func PinnedToolImage(tool ToolName) string {
@@ -136,10 +136,13 @@ func RewriteURLForDocker(rawURL string) string {
 }
 
 func ResolveEffectiveMode(mode ExecutionMode, tool ToolName) ExecutionMode {
+	spec := toolRegistry[tool]
 	if mode == ModeDocker || mode == ModeLocal {
 		return mode
 	}
-	spec := toolRegistry[tool]
+	if spec.DockerImage == "" {
+		return ModeLocal
+	}
 	if _, err := exec.LookPath("docker"); err == nil {
 		if _, localErr := exec.LookPath(spec.LocalBinary); localErr == nil {
 			// If local binary also exists, verify docker daemon is reachable before choosing docker
@@ -170,6 +173,9 @@ func IsToolAvailable(mode ExecutionMode, tool ToolName) bool {
 		_, err := exec.LookPath(spec.LocalBinary)
 		return err == nil
 	case ModeDocker:
+		if spec.DockerImage == "" {
+			return false
+		}
 		_, err := exec.LookPath("docker")
 		return err == nil
 	default:
@@ -178,9 +184,11 @@ func IsToolAvailable(mode ExecutionMode, tool ToolName) bool {
 				return true
 			}
 		}
-		if _, err := exec.LookPath("docker"); err == nil {
-			if err := exec.Command("docker", "info").Run(); err == nil {
-				return true
+		if spec.DockerImage != "" {
+			if _, err := exec.LookPath("docker"); err == nil {
+				if err := exec.Command("docker", "info").Run(); err == nil {
+					return true
+				}
 			}
 		}
 		return false
@@ -199,6 +207,9 @@ func BuildToolInvocation(opts ToolInvocationOptions) (ResolvedCommand, error) {
 			Args:   slices.Clone(opts.Args),
 			Mode:   ModeLocal,
 		}, nil
+	}
+	if spec.DockerImage == "" {
+		return ResolvedCommand{}, fmt.Errorf("tool %q has no pinned Docker image; install local binary %q or run in local/auto mode", opts.Tool, spec.LocalBinary)
 	}
 
 	dockerArgs := []string{

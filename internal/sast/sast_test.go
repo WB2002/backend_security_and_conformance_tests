@@ -3,6 +3,7 @@ package sast_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -522,4 +523,162 @@ func TestWriteEmbeddedSemgrepRulesAndPureGoScanners(t *testing.T) {
 	if err != nil || len(yaraFindings) != 1 || yaraFindings[0].Category != types.CategoryMalware || yaraFindings[0].Severity != types.SeverityCritical {
 		t.Fatalf("unexpected yara findings: err=%v findings=%+v", err, yaraFindings)
 	}
+}
+
+func TestEmbeddedSemgrepRules_ValidSchema(t *testing.T) {
+	outDir := t.TempDir()
+	rulesDir, err := sast.WriteEmbeddedSemgrepRules(outDir)
+	if err != nil {
+		t.Fatalf("WriteEmbeddedSemgrepRules failed: %v", err)
+	}
+
+	for _, name := range []string{"conformance-invariants.yaml", "taint-flows.yaml"} {
+		raw, err := os.ReadFile(filepath.Join(rulesDir, name))
+		if err != nil {
+			t.Fatalf("read %s failed: %v", name, err)
+		}
+		for i, line := range strings.Split(string(raw), "\n") {
+			// Top-level rule keys are indented by 4 spaces under "  - id: ...".
+			// Semgrep schema forbids metavariable-regex / metavariable-comparison at top-level.
+			if strings.HasPrefix(line, "    metavariable-regex:") || strings.HasPrefix(line, "    metavariable-comparison:") {
+				t.Fatalf("%s:%d places metavariable constraint at top-level rule scope; must be inside patterns:", name, i+1)
+			}
+			if strings.Contains(line, "`=~/") {
+				t.Fatalf("%s:%d uses invalid Semgrep regex syntax inside backtick template literal: %s", name, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+
+	if semgrepPath, err := exec.LookPath("semgrep"); err == nil {
+		cmd := exec.Command(semgrepPath, "--validate", "--metrics=off", "--config", rulesDir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("semgrep --validate failed: %v\n%s", err, string(out))
+		}
+	}
+}
+
+func TestRunSASTSuiteWithOptions_PolyglotDispatchAndParseErrors(t *testing.T) {
+	t.Run("go dispatches gosec and govulncheck", func(t *testing.T) {
+		tmp := t.TempDir()
+		var binaries []string
+		mockExec := func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+			binaries = append(binaries, cmd.Binary)
+			switch cmd.Binary {
+			case "gosec":
+				return runner.ToolExecutionResult{
+					ExitCode: 1,
+					Stdout:   `{"Issues":[{"severity":"HIGH","cwe":{"id":"89"},"rule_id":"G201","details":"SQL concat","file":"db.go","line":"10"}]}`,
+				}, nil
+			case "govulncheck":
+				return runner.ToolExecutionResult{
+					ExitCode: 3,
+					Stdout:   `{"osv":{"id":"GO-2025-0001","aliases":["CVE-2025-1111"],"summary":"Vuln"}}{"finding":{"osv":"GO-2025-0001","trace":[{"package":"example.com/a","function":"Foo","position":{"filename":"main.go","line":12}}]}}`,
+				}, nil
+			default:
+				return runner.ToolExecutionResult{ExitCode: 0}, nil
+			}
+		}
+		findings, err := sast.RunSASTSuiteWithOptions(context.Background(), tmp, types.LangGo, runner.ModeLocal, mockExec)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !slices.Contains(binaries, "gosec") || !slices.Contains(binaries, "govulncheck") {
+			t.Fatalf("expected gosec and govulncheck to run for Go, got %v", binaries)
+		}
+		if len(findings) != 2 {
+			t.Fatalf("expected 2 findings (gosec + govulncheck), got %d: %+v", len(findings), findings)
+		}
+	})
+
+	t.Run("python dispatches bandit", func(t *testing.T) {
+		tmp := t.TempDir()
+		var binaries []string
+		mockExec := func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+			binaries = append(binaries, cmd.Binary)
+			if cmd.Binary == "bandit" {
+				return runner.ToolExecutionResult{
+					ExitCode: 1,
+					Stdout:   `{"results":[{"test_id":"B608","test_name":"sql","issue_severity":"HIGH","issue_text":"SQL","filename":"app.py","line_number":9,"issue_cwe":{"id":89}}]}`,
+				}, nil
+			}
+			return runner.ToolExecutionResult{ExitCode: 0}, nil
+		}
+		findings, err := sast.RunSASTSuiteWithOptions(context.Background(), tmp, types.LangPython, runner.ModeLocal, mockExec)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !slices.Contains(binaries, "bandit") || len(findings) != 1 || findings[0].Tool != "bandit" {
+			t.Fatalf("expected bandit dispatch and finding, binaries=%v findings=%+v", binaries, findings)
+		}
+	})
+
+	t.Run("elixir dispatches sobelow", func(t *testing.T) {
+		tmp := t.TempDir()
+		var binaries []string
+		mockExec := func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+			binaries = append(binaries, cmd.Binary)
+			if cmd.Binary == "sobelow" {
+				return runner.ToolExecutionResult{
+					ExitCode: 1,
+					Stdout:   `{"findings":{"high_confidence":[{"type":"SQL.Query: SQL injection","file":"lib/a.ex","line":7}],"medium_confidence":[],"low_confidence":[]}}`,
+				}, nil
+			}
+			return runner.ToolExecutionResult{ExitCode: 0}, nil
+		}
+		findings, err := sast.RunSASTSuiteWithOptions(context.Background(), tmp, types.LangElixir, runner.ModeLocal, mockExec)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !slices.Contains(binaries, "sobelow") || len(findings) != 1 || findings[0].Tool != "sobelow" {
+			t.Fatalf("expected sobelow dispatch and finding, binaries=%v findings=%+v", binaries, findings)
+		}
+	})
+
+	t.Run("typescript runs boundary safety and yara when rules exist", func(t *testing.T) {
+		tmp := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(tmp, "src", "auth"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "src", "auth", "policy.ts"), []byte("const x = input as any;\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(tmp, "rules", "yara"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "rules", "yara", "custom.yara"), []byte("rule Sample { condition: false }\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var binaries []string
+		mockExec := func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+			binaries = append(binaries, cmd.Binary)
+			if cmd.Binary == "yara" {
+				return runner.ToolExecutionResult{
+					ExitCode: 0,
+					Stdout:   "Sample " + filepath.Join(tmp, "src", "auth", "policy.ts") + "\n",
+				}, nil
+			}
+			return runner.ToolExecutionResult{ExitCode: 0}, nil
+		}
+		findings, err := sast.RunSASTSuiteWithOptions(context.Background(), tmp, types.LangTypeScript, runner.ModeLocal, mockExec)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !slices.Contains(binaries, "yara") || len(findings) != 2 {
+			t.Fatalf("expected ts-boundary + yara findings, binaries=%v findings=%+v", binaries, findings)
+		}
+	})
+
+	t.Run("malformed polyglot json returns parse error", func(t *testing.T) {
+		tmp := t.TempDir()
+		mockExec := func(ctx context.Context, cmd runner.ResolvedCommand) (runner.ToolExecutionResult, error) {
+			if cmd.Binary == "gosec" {
+				return runner.ToolExecutionResult{ExitCode: 1, Stdout: "{not-valid-json"}, nil
+			}
+			return runner.ToolExecutionResult{ExitCode: 0}, nil
+		}
+		_, err := sast.RunSASTSuiteWithOptions(context.Background(), tmp, types.LangGo, runner.ModeLocal, mockExec)
+		if err == nil {
+			t.Fatalf("expected parse error for malformed gosec JSON, got nil")
+		}
+	})
 }

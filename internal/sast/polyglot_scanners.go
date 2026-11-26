@@ -623,9 +623,11 @@ func runPolyglotScanners(
 				AllowedExitCodes: []int{0, 1},
 			}, execFn)
 			if err == nil && strings.TrimSpace(res.Stdout) != "" {
-				if f, pErr := ParseGosecOutput([]byte(res.Stdout), targetDir); pErr == nil {
-					all = append(all, f...)
+				f, pErr := ParseGosecOutput([]byte(res.Stdout), targetDir)
+				if pErr != nil {
+					return nil, pErr
 				}
+				all = append(all, f...)
 			}
 		}
 		if canInvokeTool(mode, runner.ToolGovulncheck, execFn) {
@@ -637,9 +639,11 @@ func runPolyglotScanners(
 				AllowedExitCodes: []int{0, 1, 3},
 			}, execFn)
 			if err == nil && strings.TrimSpace(res.Stdout) != "" {
-				if f, pErr := ParseGovulncheckOutput([]byte(res.Stdout), targetDir); pErr == nil {
-					all = append(all, f...)
+				f, pErr := ParseGovulncheckOutput([]byte(res.Stdout), targetDir)
+				if pErr != nil {
+					return nil, pErr
 				}
+				all = append(all, f...)
 			}
 		}
 
@@ -653,9 +657,11 @@ func runPolyglotScanners(
 				AllowedExitCodes: []int{0, 1},
 			}, execFn)
 			if err == nil && strings.TrimSpace(res.Stdout) != "" {
-				if f, pErr := ParseBanditOutput([]byte(res.Stdout), targetDir); pErr == nil {
-					all = append(all, f...)
+				f, pErr := ParseBanditOutput([]byte(res.Stdout), targetDir)
+				if pErr != nil {
+					return nil, pErr
 				}
+				all = append(all, f...)
 			}
 		}
 
@@ -669,9 +675,11 @@ func runPolyglotScanners(
 				AllowedExitCodes: []int{0, 1},
 			}, execFn)
 			if err == nil && strings.TrimSpace(res.Stdout) != "" {
-				if f, pErr := ParseSobelowOutput([]byte(res.Stdout), targetDir); pErr == nil {
-					all = append(all, f...)
+				f, pErr := ParseSobelowOutput([]byte(res.Stdout), targetDir)
+				if pErr != nil {
+					return nil, pErr
 				}
+				all = append(all, f...)
 			}
 		}
 
@@ -698,9 +706,11 @@ func runPolyglotScanners(
 				AllowedExitCodes: []int{0, 1},
 			}, execFn)
 			if err == nil && strings.TrimSpace(res.Stdout) != "" {
-				if f, pErr := ParseYARAOutput([]byte(res.Stdout), targetDir); pErr == nil {
-					all = append(all, f...)
+				f, pErr := ParseYARAOutput([]byte(res.Stdout), targetDir)
+				if pErr != nil {
+					return nil, pErr
 				}
+				all = append(all, f...)
 			}
 		}
 	}

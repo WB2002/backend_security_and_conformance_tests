@@ -223,20 +223,26 @@ func TestOfflineStaticScannersDefaultNetworkNone(t *testing.T) {
 		}
 	}
 
+	// govulncheck has no official upstream Docker image; ModeAuto resolves to local binary and forced ModeDocker returns a clear error.
 	gvCmd, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
 		Tool:      runner.ToolGovulncheck,
 		Args:      []string{"-json", "./..."},
 		TargetDir: "/Users/pc/my-repo",
-		Mode:      runner.ModeDocker,
+		Mode:      runner.ModeAuto,
 	})
 	if err != nil {
-		t.Fatalf("BuildToolInvocation(govulncheck) failed: %v", err)
+		t.Fatalf("BuildToolInvocation(govulncheck, ModeAuto) failed: %v", err)
 	}
-	if !strings.Contains(runner.PinnedToolImage(runner.ToolGovulncheck), "@sha256:") {
-		t.Fatalf("expected digest-pinned image for govulncheck, got %q", runner.PinnedToolImage(runner.ToolGovulncheck))
+	if gvCmd.Binary != "govulncheck" || gvCmd.Mode != runner.ModeLocal {
+		t.Fatalf("expected local govulncheck binary in ModeAuto, got %+v", gvCmd)
 	}
-	if gvCmd.Binary != "docker" {
-		t.Fatalf("expected docker binary for govulncheck, got %s", gvCmd.Binary)
+	if _, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
+		Tool:      runner.ToolGovulncheck,
+		Args:      []string{"-json", "./..."},
+		TargetDir: "/Users/pc/my-repo",
+		Mode:      runner.ModeDocker,
+	}); err == nil {
+		t.Fatalf("expected error when forcing ModeDocker for govulncheck with no Docker image")
 	}
 }
 

@@ -5,13 +5,14 @@ rules:
     message: "Weak fast hash algorithm used on password material; use Argon2id, scrypt, or bcrypt (cost >= 10)."
     metadata:
       cwe: ["CWE-916: Use of Password Hash With Insufficient Computational Effort"]
-    pattern-either:
-      - pattern: crypto.createHash("md5").update($PWD, ...)
-      - pattern: crypto.createHash("sha1").update($PWD, ...)
-      - pattern: crypto.createHash("sha256").update($PWD, ...)
-    metavariable-regex:
-      metavariable: $PWD
-      regex: "(?i).*(pass|pwd|secret).*"
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createHash("md5").update($PWD, ...)
+          - pattern: crypto.createHash("sha1").update($PWD, ...)
+          - pattern: crypto.createHash("sha256").update($PWD, ...)
+      - metavariable-regex:
+          metavariable: $PWD
+          regex: "(?i).*(pass|pwd|secret).*"
 
   - id: conformance.crypto.weak-bcrypt-cost-js
     languages: [javascript, typescript]
@@ -19,14 +20,15 @@ rules:
     message: "bcrypt cost factor is below 10; use cost >= 10 (12 recommended)."
     metadata:
       cwe: ["CWE-916: Use of Password Hash With Insufficient Computational Effort"]
-    pattern-either:
-      - pattern: bcrypt.hash($PWD, $COST)
-      - pattern: bcrypt.hashSync($PWD, $COST)
-      - pattern: bcrypt.genSalt($COST)
-      - pattern: bcrypt.genSaltSync($COST)
-    metavariable-comparison:
-      metavariable: $COST
-      comparison: $COST < 10
+    patterns:
+      - pattern-either:
+          - pattern: bcrypt.hash($PWD, $COST)
+          - pattern: bcrypt.hashSync($PWD, $COST)
+          - pattern: bcrypt.genSalt($COST)
+          - pattern: bcrypt.genSaltSync($COST)
+      - metavariable-comparison:
+          metavariable: $COST
+          comparison: $COST < 10
 
   - id: conformance.crypto.weak-bcrypt-cost-go
     languages: [go]
@@ -34,10 +36,11 @@ rules:
     message: "bcrypt cost factor is below 10; use bcrypt.DefaultCost or higher."
     metadata:
       cwe: ["CWE-916: Use of Password Hash With Insufficient Computational Effort"]
-    pattern: bcrypt.GenerateFromPassword($PWD, $COST)
-    metavariable-comparison:
-      metavariable: $COST
-      comparison: $COST < 10
+    patterns:
+      - pattern: bcrypt.GenerateFromPassword($PWD, $COST)
+      - metavariable-comparison:
+          metavariable: $COST
+          comparison: $COST < 10
 
   - id: conformance.crypto.weak-password-hash-python
     languages: [python]
@@ -130,7 +133,11 @@ rules:
     pattern-either:
       - pattern: $DB.query("=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b/" + $X, ...)
       - pattern: $DB.execute("=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b/" + $X, ...)
-      - pattern: $DB.query(`=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b.*\\$\\{/` , ...)
+      - patterns:
+          - pattern: $DB.query(`$Q`, ...)
+          - metavariable-regex:
+              metavariable: $Q
+              regex: "(?i)^(SELECT|INSERT|UPDATE|DELETE)\\b.*\\$\\{"
 
   - id: conformance.sql.raw-string-concat-go
     languages: [go]
