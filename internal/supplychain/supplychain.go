@@ -23,8 +23,6 @@ var skippedDirs = map[string]bool{
 	"dist":                true,
 	"build":               true,
 	"_build":              true,
-	"deps":                true,
-	"vendor":              true,
 	".venv":               true,
 	"venv":                true,
 	".worktrees":          true,
@@ -33,9 +31,6 @@ var skippedDirs = map[string]bool{
 	".tsd-emit":           true,
 	"coverage":            true,
 	"reports":             true,
-	"test":                true,
-	"tests":               true,
-	"__tests__":           true,
 }
 
 var lockfileNames = map[string]bool{
@@ -46,30 +41,6 @@ var lockfileNames = map[string]bool{
 	"poetry.lock":       true,
 	"go.sum":            true,
 	"mix.lock":          true,
-}
-
-var binaryExtensions = map[string]bool{
-	".png":   true,
-	".jpg":   true,
-	".jpeg":  true,
-	".gif":   true,
-	".ico":   true,
-	".webp":  true,
-	".woff":  true,
-	".woff2": true,
-	".ttf":   true,
-	".eot":   true,
-	".pdf":   true,
-	".zip":   true,
-	".tar":   true,
-	".gz":    true,
-	".exe":   true,
-	".dll":   true,
-	".so":    true,
-	".dylib": true,
-	".pyc":   true,
-	".beam":  true,
-	".wasm":  true,
 }
 
 var (
@@ -134,9 +105,6 @@ func ScanRepository(targetDir string, lang types.BoilerplateLanguage) ([]types.S
 		if lockfileNames[name] {
 			return nil
 		}
-		if binaryExtensions[strings.ToLower(filepath.Ext(name))] {
-			return nil
-		}
 
 		rel, relErr := filepath.Rel(targetDir, path)
 		if relErr != nil {
@@ -148,7 +116,14 @@ func ScanRepository(targetDir string, lang types.BoilerplateLanguage) ([]types.S
 		}
 
 		fi, statErr := d.Info()
-		if statErr != nil || fi.Size() == 0 || fi.Size() > maxTextFileBytes {
+		if statErr != nil {
+			return nil
+		}
+
+		// Inspect magic bytes and executable extensions before applying maxTextFileBytes.
+		binFindings, skipText := ScanBinaryOrOversizedFile(relSlash, path, fi.Size())
+		findings = append(findings, binFindings...)
+		if skipText {
 			return nil
 		}
 
@@ -157,15 +132,33 @@ func ScanRepository(targetDir string, lang types.BoilerplateLanguage) ([]types.S
 			return nil
 		}
 		content := string(data)
+		isTest := isTestFilePath(relSlash)
 
-		// Check 1: Trojan Source bidi overrides & Variation Selector steganography.
-		findings = append(findings, scanTrojanSourceUnicode(relSlash, content)...)
+		// Check 1: Trojan Source bidi overrides, Variation Selector steganography,
+		// invisible Unicode, and UTR #39 mixed-script homoglyphs.
+		findings = append(findings, ScanUnicodeAnomalies(relSlash, content)...)
 
-		if !isTestSourceFile(name) {
-			// Check 2: Obfuscated Base64 / hex-escaped execution droppers.
-			findings = append(findings, scanObfuscatedPayloads(relSlash, content)...)
+		// Check 2: Single-line & multi-line obfuscated payloads + dynamic exec / unsafe deserialization.
+		obfFindings := scanObfuscatedPayloads(relSlash, content, isTest)
+		findings = append(findings, obfFindings...)
 
-			// Check 3: Pipe-to-shell, reverse shells, and credential exfil reads.
+		hasSingleLineDropper := false
+		for _, f := range obfFindings {
+			if f.ID == "malware-obfuscated-exec-dropper" {
+				hasSingleLineDropper = true
+				break
+			}
+		}
+		for _, f := range ScanMultiLineObfuscationAndDynamicExec(relSlash, content, isTest) {
+			if hasSingleLineDropper && f.ID == "malware-obfuscated-exec-dropper" {
+				continue
+			}
+			findings = append(findings, f)
+		}
+
+		// Check 3: Pipe-to-shell, reverse shells, and credential exfil reads.
+		// In test files, only flag when paired with an execution sink.
+		if !isTest || hasExecSink(content) {
 			findings = append(findings, scanShellDropperOrExfil(relSlash, content)...)
 		}
 
@@ -347,65 +340,6 @@ func isAllowlistedPath(relSlash string, regexes []*regexp.Regexp) bool {
 	return false
 }
 
-func isBidiControlRune(r rune) bool {
-	return (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
-}
-
-func isVariationSelectorRune(r rune) bool {
-	return (r >= 0xFE00 && r <= 0xFE0F) || (r >= 0xE0100 && r <= 0xE01EF)
-}
-
-func scanTrojanSourceUnicode(relPath, content string) []types.SecurityFinding {
-	var findings []types.SecurityFinding
-	line := 1
-	bidiReported := false
-	vsReported := false
-	vsRun := 0
-
-	for _, r := range content {
-		if r == '\n' {
-			line++
-			vsRun = 0
-			continue
-		}
-		if !bidiReported && isBidiControlRune(r) {
-			bidiReported = true
-			findings = append(findings, types.SecurityFinding{
-				ID:          "malware-trojan-source-unicode",
-				Category:    types.CategoryMalware,
-				Tool:        "supplychain",
-				Severity:    types.SeverityCritical,
-				Title:       fmt.Sprintf("Trojan Source bidirectional Unicode control character (U+%04X) in %s", r, relPath),
-				Description: "Bidirectional override/isolate Unicode control characters (CVE-2021-42574) can disguise malicious code logic from human reviewers.",
-				FilePath:    relPath,
-				Line:        line,
-				CWE:         "CWE-1007",
-			})
-		}
-		if isVariationSelectorRune(r) {
-			vsRun++
-			if !vsReported && vsRun >= 4 {
-				vsReported = true
-				findings = append(findings, types.SecurityFinding{
-					ID:          "malware-trojan-source-unicode",
-					Category:    types.CategoryMalware,
-					Tool:        "supplychain",
-					Severity:    types.SeverityCritical,
-					Title:       fmt.Sprintf("Invisible Unicode Variation Selector steganography run in %s", relPath),
-					Description: "Detected 4 or more consecutive Unicode Variation Selector runes (U+FE00..U+FE0F or U+E0100..U+E01EF), a known steganographic malware payload technique.",
-					FilePath:    relPath,
-					Line:        line,
-					CWE:         "CWE-506",
-				})
-			}
-		} else {
-			vsRun = 0
-		}
-	}
-
-	return findings
-}
-
 func hasExecSink(content string) bool {
 	for _, indicator := range execSinkIndicators {
 		if strings.Contains(content, indicator) {
@@ -431,7 +365,7 @@ func isBenignBase64Prefix(line string, matchStart int) bool {
 	return false
 }
 
-func scanObfuscatedPayloads(relPath, content string) []types.SecurityFinding {
+func scanObfuscatedPayloads(relPath, content string, isTestFile bool) []types.SecurityFinding {
 	lines := strings.Split(content, "\n")
 	matchLine := 0
 	matchKind := ""
@@ -479,6 +413,10 @@ func scanObfuscatedPayloads(relPath, content string) []types.SecurityFinding {
 		}}
 	}
 
+	if isTestFile {
+		return nil
+	}
+
 	return []types.SecurityFinding{{
 		ID:          "supplychain-suspicious-encoded-blob",
 		Category:    types.CategorySupplyChain,
@@ -490,6 +428,19 @@ func scanObfuscatedPayloads(relPath, content string) []types.SecurityFinding {
 		Line:        matchLine,
 		CWE:         "CWE-506",
 	}}
+}
+
+func isTestFilePath(relSlash string) bool {
+	if isTestSourceFile(filepath.Base(relSlash)) {
+		return true
+	}
+	for _, seg := range strings.Split(relSlash, "/") {
+		switch seg {
+		case "test", "tests", "__tests__":
+			return true
+		}
+	}
+	return false
 }
 
 func isTestSourceFile(name string) bool {
