@@ -264,7 +264,7 @@ type goTrackedVar struct {
 }
 
 func trackGoResourceAssign(fset *token.FileSet, stmt *ast.AssignStmt, httpVars, sqlRowVars *[]goTrackedVar) {
-	if len(stmt.Rhs) != 1 || len(stmt.Lhs) < 1 {
+	if len(stmt.Rhs) != 1 || len(stmt.Lhs) < 2 {
 		return
 	}
 	call, ok := stmt.Rhs[0].(*ast.CallExpr)
@@ -401,7 +401,10 @@ func isSQLRowsCall(call *ast.CallExpr) bool {
 	if !ok {
 		return false
 	}
-	return sel.Sel.Name == "Query" || sel.Sel.Name == "QueryContext"
+	if sel.Sel.Name == "Query" && len(call.Args) >= 1 {
+		return true
+	}
+	return sel.Sel.Name == "QueryContext" && len(call.Args) >= 2
 }
 
 func isPkgCall(call *ast.CallExpr, pkgName, funcName string) bool {

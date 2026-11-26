@@ -195,6 +195,17 @@ func properHTTPTimeouts() (*http.Server, *http.Client, *http.Client) {
 	cli2 := &http.Client{Transport: &http.Transport{}}
 	return srv, cli1, cli2
 }
+
+type retrier struct{}
+
+func (retrier) Do(fn func() error) error { return fn() }
+
+func nonResourceQueryAndSingleReturnDo(r *http.Request, retry retrier, fn func() error) error {
+	q := r.URL.Query()
+	_ = q.Get("id")
+	err := retry.Do(fn)
+	return err
+}
 `)
 
 		cleanFindings, err := ScanStaticResourceLeaks(cleanDir, types.LangGo)
