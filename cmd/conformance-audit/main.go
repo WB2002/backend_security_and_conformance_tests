@@ -204,16 +204,70 @@ func collectSourceFiles(targetDir string, lang types.BoilerplateLanguage) map[st
 	return files
 }
 
+const maxOpenAPIDocBytes = 2 * 1024 * 1024
+
+func isSubpath(baseDir, targetPath string) bool {
+	rel, err := filepath.Rel(baseDir, targetPath)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func readContainedRegularFile(targetDir, relPath string, maxBytes int64) ([]byte, bool) {
+	if strings.TrimSpace(targetDir) == "" || strings.TrimSpace(relPath) == "" {
+		return nil, false
+	}
+	absTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		return nil, false
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(absTarget)
+	if err != nil {
+		return nil, false
+	}
+
+	cleanedRel := strings.TrimLeft(strings.TrimSpace(relPath), "/\\")
+	if cleanedRel == "" {
+		return nil, false
+	}
+	absCand, err := filepath.Abs(filepath.Join(resolvedTarget, filepath.FromSlash(cleanedRel)))
+	if err != nil || !isSubpath(resolvedTarget, absCand) {
+		return nil, false
+	}
+
+	resolvedCand, err := filepath.EvalSymlinks(absCand)
+	if err != nil || !isSubpath(resolvedTarget, resolvedCand) {
+		return nil, false
+	}
+
+	info, err := os.Stat(resolvedCand)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
+
+	f, err := os.Open(resolvedCand)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes))
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
+}
+
 func loadOpenAPIDoc(ctx context.Context, targetDir, baseURL, openAPIURL string) []byte {
 	trimmed := strings.TrimSpace(openAPIURL)
 	if trimmed != "" && !strings.HasPrefix(trimmed, "http://") && !strings.HasPrefix(trimmed, "https://") {
-		cand := filepath.Join(targetDir, strings.TrimPrefix(trimmed, "/"))
-		if data, err := os.ReadFile(cand); err == nil && len(data) > 0 {
+		if data, ok := readContainedRegularFile(targetDir, trimmed, maxOpenAPIDocBytes); ok {
 			return data
 		}
 	}
 	for _, rel := range []string{"openapi.json", "openapi.yaml", "openapi.yml", "swagger.json", "docs/openapi.json"} {
-		if data, err := os.ReadFile(filepath.Join(targetDir, rel)); err == nil && len(data) > 0 {
+		if data, ok := readContainedRegularFile(targetDir, rel, maxOpenAPIDocBytes); ok {
 			return data
 		}
 	}
@@ -235,7 +289,7 @@ func loadOpenAPIDoc(ctx context.Context, targetDir, baseURL, openAPIURL string) 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxOpenAPIDocBytes))
 	if err != nil {
 		return nil
 	}

@@ -158,3 +158,70 @@ func TestRunStaticGraphStage_ArchitectureAndLeakSAST(t *testing.T) {
 		t.Fatalf("expected leak-sast finding leak-go-unclosed-resp-body in %+v", card.Findings)
 	}
 }
+
+func TestLoadOpenAPIDoc_ContainmentAndSizeLimit(t *testing.T) {
+	parentDir := t.TempDir()
+	targetDir := filepath.Join(parentDir, "repo")
+	if err := os.MkdirAll(filepath.Join(targetDir, "specs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	outsideFile := filepath.Join(parentDir, "outside.json")
+	if err := os.WriteFile(outsideFile, []byte(`{"secret":"outside-leak"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	validSpec := filepath.Join(targetDir, "specs", "openapi.json")
+	wantSpec := `{"openapi":"3.0.0","paths":{"/health":{}}}`
+	if err := os.WriteFile(validSpec, []byte(wantSpec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Valid regular file inside targetDir loads cleanly.
+	for _, specPath := range []string{"/specs/openapi.json", "specs/openapi.json"} {
+		got := loadOpenAPIDoc(context.Background(), targetDir, "", specPath)
+		if string(got) != wantSpec {
+			t.Fatalf("loadOpenAPIDoc(%q) = %q, want %q", specPath, string(got), wantSpec)
+		}
+	}
+
+	// 2. Traversal paths must not read outside targetDir.
+	for _, escapePath := range []string{"/../../../etc/passwd", "../outside.json", "/../outside.json", "specs/../../outside.json"} {
+		if got := loadOpenAPIDoc(context.Background(), targetDir, "", escapePath); len(got) != 0 {
+			t.Fatalf("expected traversal path %q to be rejected, got %q", escapePath, string(got))
+		}
+	}
+
+	// 3. Symlink inside targetDir escaping to outsideFile must be rejected.
+	escapeLink := filepath.Join(targetDir, "escape-link.json")
+	if err := os.Symlink(outsideFile, escapeLink); err != nil {
+		t.Skipf("symlink not supported in test environment: %v", err)
+	}
+	if got := loadOpenAPIDoc(context.Background(), targetDir, "", "escape-link.json"); len(got) != 0 {
+		t.Fatalf("expected escaping symlink to be rejected, got %q", string(got))
+	}
+
+	// Standard fallback candidate symlink escaping targetDir must also be rejected.
+	fallbackLink := filepath.Join(targetDir, "openapi.json")
+	if err := os.Symlink(outsideFile, fallbackLink); err != nil {
+		t.Skipf("symlink not supported in test environment: %v", err)
+	}
+	if got := loadOpenAPIDoc(context.Background(), targetDir, "", ""); len(got) != 0 {
+		t.Fatalf("expected escaping fallback symlink openapi.json to be rejected, got %q", string(got))
+	}
+	_ = os.Remove(fallbackLink)
+
+	// 4. Oversized regular file inside targetDir is bounded to 2 MiB.
+	hugeFile := filepath.Join(targetDir, "specs", "huge.json")
+	hugeData := make([]byte, 2*1024*1024+4096)
+	for i := range hugeData {
+		hugeData[i] = 'a'
+	}
+	if err := os.WriteFile(hugeFile, hugeData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gotHuge := loadOpenAPIDoc(context.Background(), targetDir, "", "/specs/huge.json")
+	if len(gotHuge) != 2*1024*1024 {
+		t.Fatalf("expected oversized local OpenAPI read bounded to %d bytes, got %d", 2*1024*1024, len(gotHuge))
+	}
+}
