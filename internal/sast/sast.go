@@ -69,6 +69,120 @@ func extractFirstCWE(raw any) string {
 	return ""
 }
 
+type semgrepLocation struct {
+	Path  string `json:"path"`
+	Start struct {
+		Line int `json:"line"`
+		Col  int `json:"col"`
+	} `json:"start"`
+}
+
+type semgrepTraceVar struct {
+	Location semgrepLocation `json:"location"`
+	Content  string          `json:"content"`
+}
+
+type semgrepDataflowTrace struct {
+	TaintSource      json.RawMessage   `json:"taint_source,omitempty"`
+	IntermediateVars []semgrepTraceVar `json:"intermediate_vars,omitempty"`
+	TaintSink        json.RawMessage   `json:"taint_sink,omitempty"`
+}
+
+func extractSemgrepTraceStep(raw json.RawMessage, kind, targetDir string) (types.CodeFlowStep, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return types.CodeFlowStep{}, false
+	}
+
+	// Format 1: Object {"location": {...}, "content": "..."}
+	if strings.HasPrefix(trimmed, "{") {
+		var obj semgrepTraceVar
+		if err := json.Unmarshal(raw, &obj); err == nil && (obj.Location.Path != "" || obj.Location.Start.Line > 0) {
+			return types.CodeFlowStep{
+				FilePath: NormalizeRelativePath(obj.Location.Path, targetDir),
+				Line:     obj.Location.Start.Line,
+				Column:   obj.Location.Start.Col,
+				Message:  obj.Content,
+				Kind:     kind,
+			}, true
+		}
+		return types.CodeFlowStep{}, false
+	}
+
+	// Format 2: Semgrep tagged tuple ["CliLoc", [loc, content]] or ["CliCall", [[loc, content], ...]]
+	var tuple []json.RawMessage
+	if err := json.Unmarshal(raw, &tuple); err != nil || len(tuple) < 2 {
+		return types.CodeFlowStep{}, false
+	}
+	var tag string
+	if err := json.Unmarshal(tuple[0], &tag); err != nil {
+		return types.CodeFlowStep{}, false
+	}
+
+	parseLocContentPair := func(pairRaw json.RawMessage) (types.CodeFlowStep, bool) {
+		var pair []json.RawMessage
+		if err := json.Unmarshal(pairRaw, &pair); err != nil || len(pair) < 2 {
+			return types.CodeFlowStep{}, false
+		}
+		var loc semgrepLocation
+		if err := json.Unmarshal(pair[0], &loc); err != nil {
+			return types.CodeFlowStep{}, false
+		}
+		var content string
+		_ = json.Unmarshal(pair[1], &content)
+		if loc.Path == "" && loc.Start.Line == 0 {
+			return types.CodeFlowStep{}, false
+		}
+		return types.CodeFlowStep{
+			FilePath: NormalizeRelativePath(loc.Path, targetDir),
+			Line:     loc.Start.Line,
+			Column:   loc.Start.Col,
+			Message:  content,
+			Kind:     kind,
+		}, true
+	}
+
+	switch tag {
+	case "CliLoc":
+		return parseLocContentPair(tuple[1])
+	case "CliCall":
+		var callParts []json.RawMessage
+		if err := json.Unmarshal(tuple[1], &callParts); err == nil && len(callParts) > 0 {
+			return parseLocContentPair(callParts[0])
+		}
+	}
+	return types.CodeFlowStep{}, false
+}
+
+func extractSemgrepCodeFlows(trace *semgrepDataflowTrace, targetDir string) [][]types.CodeFlowStep {
+	if trace == nil {
+		return nil
+	}
+	var steps []types.CodeFlowStep
+	if src, ok := extractSemgrepTraceStep(trace.TaintSource, "source", targetDir); ok {
+		steps = append(steps, src)
+	}
+	for _, iv := range trace.IntermediateVars {
+		if iv.Location.Path == "" && iv.Location.Start.Line == 0 {
+			continue
+		}
+		steps = append(steps, types.CodeFlowStep{
+			FilePath: NormalizeRelativePath(iv.Location.Path, targetDir),
+			Line:     iv.Location.Start.Line,
+			Column:   iv.Location.Start.Col,
+			Message:  iv.Content,
+			Kind:     "propagator",
+		})
+	}
+	if sink, ok := extractSemgrepTraceStep(trace.TaintSink, "sink", targetDir); ok {
+		steps = append(steps, sink)
+	}
+	if len(steps) == 0 {
+		return nil
+	}
+	return [][]types.CodeFlowStep{steps}
+}
+
 type semgrepResponse struct {
 	Results []struct {
 		CheckID string `json:"check_id"`
@@ -78,9 +192,10 @@ type semgrepResponse struct {
 			Col  int `json:"col"`
 		} `json:"start"`
 		Extra struct {
-			Severity string         `json:"severity"`
-			Message  string         `json:"message"`
-			Metadata map[string]any `json:"metadata"`
+			Severity      string                `json:"severity"`
+			Message       string                `json:"message"`
+			Metadata      map[string]any        `json:"metadata"`
+			DataflowTrace *semgrepDataflowTrace `json:"dataflow_trace,omitempty"`
 		} `json:"extra"`
 	} `json:"results"`
 }
@@ -107,6 +222,7 @@ func ParseSemgrepOutput(rawJSON []byte, targetDir string) ([]types.SecurityFindi
 			FilePath:    relPath,
 			Line:        r.Start.Line,
 			CWE:         cwe,
+			CodeFlows:   extractSemgrepCodeFlows(r.Extra.DataflowTrace, targetDir),
 		})
 	}
 	return findings, nil
@@ -248,7 +364,15 @@ func ParseTrivyFSOutput(rawJSON []byte, targetDir string) ([]types.SecurityFindi
 }
 
 func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMode, execFn runner.CommandExecutor) ([]types.SecurityFinding, error) {
+	return RunSASTSuiteWithOptions(ctx, targetDir, "", mode, execFn)
+}
+
+func RunSASTSuiteWithOptions(ctx context.Context, targetDir string, lang types.BoilerplateLanguage, mode runner.ExecutionMode, execFn runner.CommandExecutor) ([]types.SecurityFinding, error) {
 	var all []types.SecurityFinding
+
+	if lang == "" {
+		lang = detectBoilerplateLanguage(targetDir)
+	}
 
 	scanPathFor := func(tool runner.ToolName) string {
 		if runner.ResolveEffectiveMode(mode, tool) == runner.ModeDocker {
@@ -257,10 +381,26 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 		return targetDir
 	}
 
+	parentDir, outDir, err := runner.CreateIsolatedWorkDir("conformance-semgrep-")
+	if err != nil {
+		return nil, fmt.Errorf("create semgrep rules workdir: %w", err)
+	}
+	defer os.RemoveAll(parentDir)
+
+	rulesDir, err := WriteEmbeddedSemgrepRules(outDir)
+	if err != nil {
+		return nil, fmt.Errorf("write embedded semgrep rules: %w", err)
+	}
+	semgrepConfigPath := rulesDir
+	if runner.ResolveEffectiveMode(mode, runner.ToolSemgrep) == runner.ModeDocker {
+		semgrepConfigPath = "/out/rules"
+	}
+
 	semgrepRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolSemgrep,
-		Args:             []string{"scan", "--config", "auto", "--metrics=off", "--json", "--quiet", "--exclude", "node_modules", "--exclude", "dist", "--exclude", "test/security/semgrep-fixtures", "--exclude", ".conformance-runner", "--exclude", ".worktrees", "--exclude", ".tsd-emit", "--exclude", "coverage", scanPathFor(runner.ToolSemgrep)},
+		Args:             []string{"scan", "--config", semgrepConfigPath, "--metrics=off", "--json", "--quiet", "--exclude", "node_modules", "--exclude", "dist", "--exclude", "test/security/semgrep-fixtures", "--exclude", ".conformance-runner", "--exclude", ".worktrees", "--exclude", ".tsd-emit", "--exclude", "coverage", scanPathFor(runner.ToolSemgrep)},
 		TargetDir:        targetDir,
+		WorkDir:          outDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
 	}, execFn)
@@ -302,9 +442,15 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 		all = append(all, f...)
 	}
 
+	hygieneFindings, err := ScanGitRepoHygiene(targetDir)
+	if err != nil {
+		return nil, fmt.Errorf("git repo hygiene scan failed: %w", err)
+	}
+	all = append(all, hygieneFindings...)
+
 	trivyRes, err := runner.RunTool(ctx, runner.ToolInvocationOptions{
 		Tool:             runner.ToolTrivy,
-		Args:             []string{"fs", "--scanners", "vuln,misconfig,secret", "--format", "json", "--quiet", "--skip-dirs", "node_modules,dist,.git,.conformance-runner,.worktrees,.tsd-emit,coverage,test,tests", scanPathFor(runner.ToolTrivy)},
+		Args:             []string{"fs", "--scanners", "vuln,misconfig,secret", "--format", "json", "--quiet", "--skip-dirs", "node_modules,dist,.git,.conformance-runner,.worktrees,.tsd-emit,coverage", scanPathFor(runner.ToolTrivy)},
 		TargetDir:        targetDir,
 		Mode:             mode,
 		AllowedExitCodes: []int{0, 1},
@@ -319,6 +465,12 @@ func RunSASTSuite(ctx context.Context, targetDir string, mode runner.ExecutionMo
 		}
 		all = append(all, f...)
 	}
+
+	polyFindings, err := runPolyglotScanners(ctx, targetDir, lang, mode, execFn, scanPathFor)
+	if err != nil {
+		return nil, fmt.Errorf("polyglot scanner execution failed: %w", err)
+	}
+	all = append(all, polyFindings...)
 
 	return all, nil
 }

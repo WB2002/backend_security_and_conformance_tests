@@ -1,0 +1,165 @@
+rules:
+  - id: conformance.crypto.weak-password-hash-js
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Weak fast hash algorithm used on password material; use Argon2id, scrypt, or bcrypt (cost >= 10)."
+    metadata:
+      cwe: ["CWE-916: Use of Password Hash With Insufficient Computational Effort"]
+    pattern-either:
+      - pattern: crypto.createHash("md5").update($PWD, ...)
+      - pattern: crypto.createHash("sha1").update($PWD, ...)
+      - pattern: crypto.createHash("sha256").update($PWD, ...)
+    metavariable-regex:
+      metavariable: $PWD
+      regex: "(?i).*(pass|pwd|secret).*"
+
+  - id: conformance.crypto.weak-bcrypt-cost-js
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "bcrypt cost factor is below 10; use cost >= 10 (12 recommended)."
+    metadata:
+      cwe: ["CWE-916: Use of Password Hash With Insufficient Computational Effort"]
+    pattern-either:
+      - pattern: bcrypt.hash($PWD, $COST)
+      - pattern: bcrypt.hashSync($PWD, $COST)
+      - pattern: bcrypt.genSalt($COST)
+      - pattern: bcrypt.genSaltSync($COST)
+    metavariable-comparison:
+      metavariable: $COST
+      comparison: $COST < 10
+
+  - id: conformance.crypto.weak-bcrypt-cost-go
+    languages: [go]
+    severity: ERROR
+    message: "bcrypt cost factor is below 10; use bcrypt.DefaultCost or higher."
+    metadata:
+      cwe: ["CWE-916: Use of Password Hash With Insufficient Computational Effort"]
+    pattern: bcrypt.GenerateFromPassword($PWD, $COST)
+    metavariable-comparison:
+      metavariable: $COST
+      comparison: $COST < 10
+
+  - id: conformance.crypto.weak-password-hash-python
+    languages: [python]
+    severity: ERROR
+    message: "Weak hash algorithm (MD5/SHA1) detected; do not use for passwords or security-sensitive digests."
+    metadata:
+      cwe: ["CWE-328: Use of Weak Hash"]
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+
+  - id: conformance.http.go-client-missing-timeout
+    languages: [go]
+    severity: WARNING
+    message: "Outbound http.Client constructed without explicit Timeout; set Timeout to prevent goroutine and socket exhaustion."
+    metadata:
+      cwe: ["CWE-400: Uncontrolled Resource Consumption"]
+    patterns:
+      - pattern: "&http.Client{...}"
+      - pattern-not: "&http.Client{..., Timeout: $T, ...}"
+
+  - id: conformance.http.python-requests-missing-timeout
+    languages: [python]
+    severity: WARNING
+    message: "Python requests call without explicit timeout= can hang worker threads indefinitely."
+    metadata:
+      cwe: ["CWE-400: Uncontrolled Resource Consumption"]
+    pattern-either:
+      - patterns:
+          - pattern: requests.get(...)
+          - pattern-not: requests.get(..., timeout=$T, ...)
+      - patterns:
+          - pattern: requests.post(...)
+          - pattern-not: requests.post(..., timeout=$T, ...)
+
+  - id: conformance.http.js-axios-missing-timeout
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "Outbound axios request without explicit timeout can exhaust sockets and event-loop handles."
+    metadata:
+      cwe: ["CWE-400: Uncontrolled Resource Consumption"]
+    pattern-either:
+      - patterns:
+          - pattern: axios.get($URL, ...)
+          - pattern-not: axios.get($URL, {..., timeout: $T, ...})
+      - patterns:
+          - pattern: axios.post($URL, $BODY, ...)
+          - pattern-not: axios.post($URL, $BODY, {..., timeout: $T, ...})
+
+  - id: conformance.http.express-missing-body-limit
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "express.json() configured without an explicit size limit."
+    metadata:
+      cwe: ["CWE-770: Allocation of Resources Without Limits or Throttling"]
+    patterns:
+      - pattern: express.json(...)
+      - pattern-not: express.json({..., limit: $L, ...})
+
+  - id: conformance.http.fastify-missing-body-limit
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "Fastify instance constructed without an explicit bodyLimit."
+    metadata:
+      cwe: ["CWE-770: Allocation of Resources Without Limits or Throttling"]
+    patterns:
+      - pattern: Fastify(...)
+      - pattern-not: Fastify({..., bodyLimit: $L, ...})
+
+  - id: conformance.http.go-missing-maxbytesreader
+    languages: [go]
+    severity: WARNING
+    message: "Reading HTTP request body without http.MaxBytesReader allows unbounded memory consumption."
+    metadata:
+      cwe: ["CWE-770: Allocation of Resources Without Limits or Throttling"]
+    patterns:
+      - pattern-either:
+          - pattern: json.NewDecoder($R.Body).Decode(...)
+          - pattern: io.ReadAll($R.Body)
+      - pattern-not-inside: |
+          $R.Body = http.MaxBytesReader(...)
+          ...
+
+  - id: conformance.sql.raw-string-concat-js
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Raw SQL query built via string concatenation or template interpolation; use parameterized queries."
+    metadata:
+      cwe: ["CWE-89: SQL Injection"]
+    pattern-either:
+      - pattern: $DB.query("=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b/" + $X, ...)
+      - pattern: $DB.execute("=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b/" + $X, ...)
+      - pattern: $DB.query(`=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b.*\\$\\{/` , ...)
+
+  - id: conformance.sql.raw-string-concat-go
+    languages: [go]
+    severity: ERROR
+    message: "Raw SQL query built with fmt.Sprintf or string concatenation; use parameterized placeholders."
+    metadata:
+      cwe: ["CWE-89: SQL Injection"]
+    pattern-either:
+      - pattern: $DB.Query(fmt.Sprintf("=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b/", ...), ...)
+      - pattern: $DB.QueryContext($CTX, fmt.Sprintf("=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b/", ...), ...)
+      - pattern: $DB.Exec(fmt.Sprintf("=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b/", ...), ...)
+
+  - id: conformance.sql.raw-string-concat-python
+    languages: [python]
+    severity: ERROR
+    message: "Raw SQL query constructed via string formatting; use bound parameters."
+    metadata:
+      cwe: ["CWE-89: SQL Injection"]
+    pattern-either:
+      - pattern: $CUR.execute("=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b/" + $X)
+      - pattern: $CUR.execute("=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b/" % $X)
+      - pattern: $CUR.execute("=~/^(?i)(SELECT|INSERT|UPDATE|DELETE)\\b/".format(...))
+
+  - id: conformance.sql.raw-string-concat-elixir
+    languages: [elixir]
+    severity: ERROR
+    message: "Raw SQL query built via string concatenation; pass parameters separately to Ecto.Adapters.SQL.query."
+    metadata:
+      cwe: ["CWE-89: SQL Injection"]
+    pattern-either:
+      - pattern: Ecto.Adapters.SQL.query($REPO, $Q <> $X, ...)
+      - pattern: Ecto.Adapters.SQL.query!($REPO, $Q <> $X, ...)

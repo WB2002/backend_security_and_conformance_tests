@@ -192,3 +192,51 @@ func TestCreateIsolatedWorkDirAndHardenedDockerInvocation(t *testing.T) {
 	}
 }
 
+func TestOfflineStaticScannersDefaultNetworkNone(t *testing.T) {
+	offlineTools := []runner.ToolName{
+		runner.ToolSemgrep,
+		runner.ToolGitleaks,
+		runner.ToolGosec,
+		runner.ToolBandit,
+		runner.ToolSobelow,
+		runner.ToolYARA,
+	}
+	for _, tool := range offlineTools {
+		cmd, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
+			Tool:      tool,
+			Args:      []string{"/workspace"},
+			TargetDir: "/Users/pc/my-repo",
+			Mode:      runner.ModeDocker,
+		})
+		if err != nil {
+			t.Fatalf("BuildToolInvocation(%s) failed: %v", tool, err)
+		}
+		if !slices.Contains(cmd.Args, "--network=none") {
+			t.Fatalf("expected --network=none by default for %s, got %v", tool, cmd.Args)
+		}
+		if !slices.Contains(cmd.Args, "--read-only") {
+			t.Fatalf("expected --read-only by default for %s, got %v", tool, cmd.Args)
+		}
+		img := runner.PinnedToolImage(tool)
+		if !strings.Contains(img, "@sha256:") || strings.Contains(img, ":latest") || strings.Contains(img, ":stable") {
+			t.Fatalf("expected digest-pinned non-floating image for %s, got %q", tool, img)
+		}
+	}
+
+	gvCmd, err := runner.BuildToolInvocation(runner.ToolInvocationOptions{
+		Tool:      runner.ToolGovulncheck,
+		Args:      []string{"-json", "./..."},
+		TargetDir: "/Users/pc/my-repo",
+		Mode:      runner.ModeDocker,
+	})
+	if err != nil {
+		t.Fatalf("BuildToolInvocation(govulncheck) failed: %v", err)
+	}
+	if !strings.Contains(runner.PinnedToolImage(runner.ToolGovulncheck), "@sha256:") {
+		t.Fatalf("expected digest-pinned image for govulncheck, got %q", runner.PinnedToolImage(runner.ToolGovulncheck))
+	}
+	if gvCmd.Binary != "docker" {
+		t.Fatalf("expected docker binary for govulncheck, got %s", gvCmd.Binary)
+	}
+}
+

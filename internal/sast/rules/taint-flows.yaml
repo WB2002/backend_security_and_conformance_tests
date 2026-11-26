@@ -1,0 +1,174 @@
+rules:
+  - id: conformance.taint.js-sql-injection
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Untrusted HTTP input flows into SQL execution sink without parameterization."
+    metadata:
+      cwe: ["CWE-89: SQL Injection"]
+    pattern-sources:
+      - pattern: req.body
+      - pattern: req.query
+      - pattern: req.params
+    pattern-sinks:
+      - pattern: $DB.query($SINK, ...)
+      - pattern: $DB.execute($SINK, ...)
+      - pattern: $DB.$queryRawUnsafe($SINK, ...)
+
+  - id: conformance.taint.js-command-injection
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Untrusted HTTP input flows into OS command execution sink."
+    metadata:
+      cwe: ["CWE-78: OS Command Injection"]
+    pattern-sources:
+      - pattern: req.body
+      - pattern: req.query
+      - pattern: req.params
+    pattern-sinks:
+      - pattern: child_process.exec($SINK, ...)
+      - pattern: child_process.execSync($SINK, ...)
+      - pattern: child_process.spawn($SINK, ...)
+
+  - id: conformance.taint.js-ssrf
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Untrusted HTTP input flows into outbound HTTP fetch/axios sink (SSRF)."
+    metadata:
+      cwe: ["CWE-918: Server-Side Request Forgery (SSRF)"]
+    pattern-sources:
+      - pattern: req.body
+      - pattern: req.query
+      - pattern: req.params
+    pattern-sinks:
+      - pattern: fetch($SINK, ...)
+      - pattern: axios.get($SINK, ...)
+      - pattern: axios.post($SINK, ...)
+
+  - id: conformance.taint.js-path-traversal
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Untrusted HTTP input flows into filesystem read/open sink (Path Traversal)."
+    metadata:
+      cwe: ["CWE-22: Improper Limitation of a Pathname to a Restricted Directory"]
+    pattern-sources:
+      - pattern: req.body
+      - pattern: req.query
+      - pattern: req.params
+    pattern-sanitizers:
+      - pattern: path.basename(...)
+    pattern-sinks:
+      - pattern: fs.readFile($SINK, ...)
+      - pattern: fs.readFileSync($SINK, ...)
+      - pattern: fs.promises.readFile($SINK, ...)
+
+  - id: conformance.taint.go-command-injection
+    mode: taint
+    languages: [go]
+    severity: ERROR
+    message: "Untrusted HTTP input flows into os/exec command execution sink."
+    metadata:
+      cwe: ["CWE-78: OS Command Injection"]
+    pattern-sources:
+      - pattern: $R.URL.Query().Get(...)
+      - pattern: $R.FormValue(...)
+    pattern-sinks:
+      - pattern: exec.Command($CMD, ...)
+      - pattern: exec.CommandContext($CTX, $CMD, ...)
+
+  - id: conformance.taint.go-ssrf
+    mode: taint
+    languages: [go]
+    severity: ERROR
+    message: "Untrusted HTTP input flows into outbound HTTP request sink (SSRF)."
+    metadata:
+      cwe: ["CWE-918: Server-Side Request Forgery (SSRF)"]
+    pattern-sources:
+      - pattern: $R.URL.Query().Get(...)
+      - pattern: $R.FormValue(...)
+    pattern-sinks:
+      - pattern: http.Get($SINK)
+      - pattern: http.Post($SINK, ...)
+      - pattern: http.NewRequest($M, $SINK, ...)
+      - pattern: http.NewRequestWithContext($CTX, $M, $SINK, ...)
+
+  - id: conformance.taint.go-path-traversal
+    mode: taint
+    languages: [go]
+    severity: ERROR
+    message: "Untrusted HTTP input flows into filepath.Join or os.Open without base-dir validation."
+    metadata:
+      cwe: ["CWE-22: Improper Limitation of a Pathname to a Restricted Directory"]
+    pattern-sources:
+      - pattern: $R.URL.Query().Get(...)
+      - pattern: $R.FormValue(...)
+    pattern-sanitizers:
+      - pattern: filepath.Base(...)
+    pattern-sinks:
+      - pattern: filepath.Join($BASE, $SINK)
+      - pattern: os.Open($SINK)
+      - pattern: os.ReadFile($SINK)
+
+  - id: conformance.taint.python-command-injection
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: "Untrusted HTTP input flows into subprocess execution sink."
+    metadata:
+      cwe: ["CWE-78: OS Command Injection"]
+    pattern-sources:
+      - pattern: request.args
+      - pattern: request.form
+      - pattern: request.json
+    pattern-sinks:
+      - pattern: subprocess.run($SINK, ...)
+      - pattern: subprocess.Popen($SINK, ...)
+      - pattern: os.system($SINK)
+
+  - id: conformance.taint.python-ssrf
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: "Untrusted HTTP input flows into outbound requests call (SSRF)."
+    metadata:
+      cwe: ["CWE-918: Server-Side Request Forgery (SSRF)"]
+    pattern-sources:
+      - pattern: request.args
+      - pattern: request.form
+      - pattern: request.json
+    pattern-sinks:
+      - pattern: requests.request($M, $SINK, ...)
+      - pattern: requests.get($SINK, ...)
+      - pattern: requests.post($SINK, ...)
+
+  - id: conformance.taint.python-path-traversal
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: "Untrusted HTTP input flows into open() filesystem sink."
+    metadata:
+      cwe: ["CWE-22: Improper Limitation of a Pathname to a Restricted Directory"]
+    pattern-sources:
+      - pattern: request.args
+      - pattern: request.form
+      - pattern: request.json
+    pattern-sanitizers:
+      - pattern: os.path.basename(...)
+    pattern-sinks:
+      - pattern: open($SINK, ...)
+
+  - id: conformance.taint.elixir-command-injection
+    mode: taint
+    languages: [elixir]
+    severity: ERROR
+    message: "Untrusted Phoenix conn.params input flows into System.cmd execution sink."
+    metadata:
+      cwe: ["CWE-78: OS Command Injection"]
+    pattern-sources:
+      - pattern: conn.params
+    pattern-sinks:
+      - pattern: System.cmd($SINK, ...)
+      - pattern: :os.cmd($SINK)
