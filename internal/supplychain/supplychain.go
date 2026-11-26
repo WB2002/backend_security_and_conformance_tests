@@ -3,6 +3,7 @@ package supplychain
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -73,8 +74,17 @@ var execSinkIndicators = []string{
 }
 
 // ScanRepository runs pure-Go polyglot anti-malware, Trojan-Source, lockfile integrity,
-// lifecycle hook, and GitHub Actions injection checks on targetDir.
+// lifecycle hook, and GitHub Actions injection checks on targetDir using offline defaults.
 func ScanRepository(targetDir string, lang types.BoilerplateLanguage) ([]types.SecurityFinding, error) {
+	return ScanRepositoryWithOptions(context.Background(), targetDir, lang, ScanOptions{})
+}
+
+// ScanRepositoryWithOptions runs the full supply-chain and anti-malware scanner with
+// configurable registry allowlists and optional online package-age enrichment.
+func ScanRepositoryWithOptions(ctx context.Context, targetDir string, lang types.BoilerplateLanguage, opts ScanOptions) ([]types.SecurityFinding, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(targetDir) == "" {
 		return nil, fmt.Errorf("targetDir must not be empty")
 	}
@@ -168,14 +178,20 @@ func ScanRepository(targetDir string, lang types.BoilerplateLanguage) ([]types.S
 		return nil, walkErr
 	}
 
-	// Check 4: Malicious lifecycle hooks (package.json, setup.py).
-	findings = append(findings, scanLifecycleHooks(targetDir)...)
+	// Check 4: Workspace lifecycle hooks (package.json, setup.py, pyproject.toml, //go:generate, mix.exs, Makefile).
+	findings = append(findings, scanWorkspaceLifecycleHooks(targetDir, allowlistRegexes)...)
 
-	// Check 5: Lockfile presence, integrity hashes, cleartext HTTP, and floating git deps.
+	// Check 5: Lockfile presence, integrity hashes, cleartext HTTP, floating git deps, and registry allowlists.
+	allowedRegistries := buildAllowedRegistrySet(opts)
 	findings = append(findings, scanLockfileAndDependencyIntegrity(targetDir, lang)...)
+	findings = append(findings, scanPolyglotLockfilesAndRegistries(targetDir, allowedRegistries)...)
 
-	// Check 6: GitHub Actions workflow injection & unpinned actions.
+	// Check 6: Direct dependency typosquatting & optional deps.dev package age enrichment.
+	findings = append(findings, scanTyposquattingAndAge(ctx, targetDir, opts)...)
+
+	// Check 7: GitHub Actions workflow injection, 40-char SHA pinning, permissions, and .gitmodules hijack.
 	findings = append(findings, scanGitHubWorkflows(targetDir)...)
+	findings = append(findings, scanGitModules(targetDir)...)
 
 	return findings, nil
 }
@@ -505,59 +521,6 @@ type packageJSONDoc struct {
 	DevDependencies      map[string]string `json:"devDependencies"`
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
 	PeerDependencies     map[string]string `json:"peerDependencies"`
-}
-
-func scanLifecycleHooks(targetDir string) []types.SecurityFinding {
-	var findings []types.SecurityFinding
-
-	pkgPath := filepath.Join(targetDir, "package.json")
-	if data, err := os.ReadFile(pkgPath); err == nil {
-		var pkg packageJSONDoc
-		if json.Unmarshal(data, &pkg) == nil && len(pkg.Scripts) > 0 {
-			hooks := []string{"preinstall", "install", "postinstall", "preuninstall", "postuninstall"}
-			for _, hook := range hooks {
-				cmd := strings.TrimSpace(pkg.Scripts[hook])
-				if cmd == "" {
-					continue
-				}
-				cat := types.CategorySupplyChain
-				sev := types.SeverityHigh
-				if reDangerousHookCmd.MatchString(cmd) {
-					cat = types.CategoryMalware
-					sev = types.SeverityCritical
-				}
-				findings = append(findings, types.SecurityFinding{
-					ID:          "supplychain-malicious-lifecycle-hook",
-					Category:    cat,
-					Tool:        "supplychain",
-					Severity:    sev,
-					Title:       fmt.Sprintf("Package lifecycle hook %q in package.json", hook),
-					Description: fmt.Sprintf("Lifecycle script %q executes: %s", hook, cmd),
-					FilePath:    "package.json",
-					CWE:         "CWE-506",
-				})
-			}
-		}
-	}
-
-	setupPath := filepath.Join(targetDir, "setup.py")
-	if data, err := os.ReadFile(setupPath); err == nil {
-		content := string(data)
-		if reSetupPyDangerous.MatchString(content) {
-			findings = append(findings, types.SecurityFinding{
-				ID:          "supplychain-malicious-lifecycle-hook",
-				Category:    types.CategoryMalware,
-				Tool:        "supplychain",
-				Severity:    types.SeverityCritical,
-				Title:       "Suspicious command or network execution in Python setup.py",
-				Description: "setup.py invokes subprocess, os.system, urllib, or dynamic eval/exec during package installation.",
-				FilePath:    "setup.py",
-				CWE:         "CWE-506",
-			})
-		}
-	}
-
-	return findings
 }
 
 func fileExists(path string) bool {
@@ -902,7 +865,36 @@ func scanGitHubWorkflows(targetDir string) []types.SecurityFinding {
 			})
 		}
 
-		// 2. Untrusted ${{ github.event.* }} inside run: steps & 3. unpinned uses: @main/@master/@HEAD
+		// 1b. workflow_run + untrusted head SHA/branch checkout
+		if reGHAWorkflowRun.MatchString(content) && reGHAWorkflowRunHead.MatchString(content) {
+			findings = append(findings, types.SecurityFinding{
+				ID:          "supplychain-github-actions-injection",
+				Category:    types.CategorySupplyChain,
+				Tool:        "supplychain",
+				Severity:    types.SeverityCritical,
+				Title:       fmt.Sprintf("Dangerous workflow_run checkout of untrusted head ref in %s", relPath),
+				Description: "Combining workflow_run with github.event.workflow_run.head_sha/head_branch executes untrusted code with privileged workflow_run tokens.",
+				FilePath:    relPath,
+				CWE:         "CWE-94",
+			})
+		}
+
+		// 1c. Missing top-level permissions: block
+		if !reGHATopPermissions.MatchString(content) {
+			findings = append(findings, types.SecurityFinding{
+				ID:          "supplychain-github-actions-permissions",
+				Category:    types.CategorySupplyChain,
+				Tool:        "supplychain",
+				Severity:    types.SeverityMedium,
+				Title:       fmt.Sprintf("Missing top-level permissions: block in %s", relPath),
+				Description: "Workflows must declare an explicit least-privilege top-level permissions: block (e.g. permissions: contents: read).",
+				FilePath:    relPath,
+				CWE:         "CWE-250",
+			})
+		}
+
+		// 2. Untrusted ${{ github.event.* }} / GITHUB_ENV / GITHUB_PATH / LD_PRELOAD inside run: steps
+		// & 3. unpinned third-party uses: (must be 40-char lowercase hex commit SHA)
 		lines := strings.Split(content, "\n")
 		inRunBlock := false
 		runIndent := 0
@@ -921,15 +913,15 @@ func scanGitHubWorkflows(targetDir string) []types.SecurityFinding {
 			if m := reGHAUses.FindStringSubmatch(line); len(m) > 1 {
 				actionRef := strings.Trim(m[1], `"'`)
 				if !strings.HasPrefix(actionRef, "./") && !strings.HasPrefix(actionRef, "docker://") {
-					lowerRef := strings.ToLower(actionRef)
-					if strings.HasSuffix(lowerRef, "@main") || strings.HasSuffix(lowerRef, "@master") || strings.HasSuffix(lowerRef, "@head") {
+					atIdx := strings.LastIndex(actionRef, "@")
+					if atIdx < 0 || !reHexSHA40.MatchString(actionRef[atIdx+1:]) {
 						findings = append(findings, types.SecurityFinding{
 							ID:          "supplychain-github-actions-injection",
 							Category:    types.CategorySupplyChain,
 							Tool:        "supplychain",
 							Severity:    types.SeverityHigh,
-							Title:       fmt.Sprintf("Unpinned mutable GitHub Action reference %q in %s", actionRef, relPath),
-							Description: "Pin third-party GitHub Actions to an immutable commit SHA or version tag instead of @main/@master/@HEAD.",
+							Title:       fmt.Sprintf("Unpinned GitHub Action reference %q (must be 40-char commit SHA) in %s", actionRef, relPath),
+							Description: "Pin third-party GitHub Actions to an immutable 40-character lowercase hex commit SHA instead of mutable tags or branches.",
 							FilePath:    relPath,
 							Line:        i + 1,
 							CWE:         "CWE-829",
@@ -958,19 +950,45 @@ func scanGitHubWorkflows(targetDir string) []types.SecurityFinding {
 						Line:        i + 1,
 						CWE:         "CWE-78",
 					})
+				} else if reGHARunEnvInject.MatchString(rhs) {
+					findings = append(findings, types.SecurityFinding{
+						ID:          "supplychain-github-actions-injection",
+						Category:    types.CategorySupplyChain,
+						Tool:        "supplychain",
+						Severity:    types.SeverityHigh,
+						Title:       fmt.Sprintf("Dangerous GITHUB_ENV/GITHUB_PATH/LD_PRELOAD injection in %s", relPath),
+						Description: fmt.Sprintf("Run step on line %d writes to GITHUB_ENV/GITHUB_PATH or sets LD_PRELOAD.", i+1),
+						FilePath:    relPath,
+						Line:        i + 1,
+						CWE:         "CWE-78",
+					})
 				}
-			} else if inRunBlock && reGHAUntrustedExpr.MatchString(line) {
-				findings = append(findings, types.SecurityFinding{
-					ID:          "supplychain-github-actions-injection",
-					Category:    types.CategorySupplyChain,
-					Tool:        "supplychain",
-					Severity:    types.SeverityCritical,
-					Title:       fmt.Sprintf("GitHub Actions script injection via untrusted expression in %s", relPath),
-					Description: fmt.Sprintf("Untrusted github.event.* expression interpolated directly into shell run step on line %d.", i+1),
-					FilePath:    relPath,
-					Line:        i + 1,
-					CWE:         "CWE-78",
-				})
+			} else if inRunBlock {
+				if reGHAUntrustedExpr.MatchString(line) {
+					findings = append(findings, types.SecurityFinding{
+						ID:          "supplychain-github-actions-injection",
+						Category:    types.CategorySupplyChain,
+						Tool:        "supplychain",
+						Severity:    types.SeverityCritical,
+						Title:       fmt.Sprintf("GitHub Actions script injection via untrusted expression in %s", relPath),
+						Description: fmt.Sprintf("Untrusted github.event.* expression interpolated directly into shell run step on line %d.", i+1),
+						FilePath:    relPath,
+						Line:        i + 1,
+						CWE:         "CWE-78",
+					})
+				} else if reGHARunEnvInject.MatchString(line) {
+					findings = append(findings, types.SecurityFinding{
+						ID:          "supplychain-github-actions-injection",
+						Category:    types.CategorySupplyChain,
+						Tool:        "supplychain",
+						Severity:    types.SeverityHigh,
+						Title:       fmt.Sprintf("Dangerous GITHUB_ENV/GITHUB_PATH/LD_PRELOAD injection in %s", relPath),
+						Description: fmt.Sprintf("Run block on line %d writes to GITHUB_ENV/GITHUB_PATH or sets LD_PRELOAD.", i+1),
+						FilePath:    relPath,
+						Line:        i + 1,
+						CWE:         "CWE-78",
+					})
+				}
 			}
 		}
 	}
