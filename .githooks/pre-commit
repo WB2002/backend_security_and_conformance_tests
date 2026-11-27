@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$HOME/go/bin:/usr/local/bin:$PATH"
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "${ROOT_DIR}"
+
+STAGED_GO_FILES="$(git diff --cached --name-only --diff-filter=ACM | grep '\.go$' || true)"
+if [[ -n "${STAGED_GO_FILES}" ]]; then
+  UNFORMATTED="$(printf '%s\n' "${STAGED_GO_FILES}" | xargs gofmt -l)"
+  if [[ -n "${UNFORMATTED}" ]]; then
+    echo "The following Go files are not formatted (run gofmt -w):" >&2
+    printf '%s\n' "${UNFORMATTED}" >&2
+    exit 1
+  fi
+
+  go vet ./...
+fi
+
+./scripts/gitleaks-pre-commit.sh
